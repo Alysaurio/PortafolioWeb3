@@ -1,0 +1,29 @@
+[
+  {
+    "id": "proyecto1",
+    "title": "PROYECTO 01",
+    "shortConcept": "Descripción breve del concepto jugable en una o dos líneas.",
+    "fullDescription": "Descripción ampliada del proyecto, mecánicas principales, motor (Unity / C#) y dirección artística.",
+    "video": "assets/videos/proyecto1.mp4",
+    "fallbackColor": "#4A90E2",
+    "repoUrl": ""
+  },
+  {
+    "id": "proyecto2",
+    "title": "PROYECTO 02",
+    "shortConcept": "Descripción breve del concepto jugable en una o dos líneas.",
+    "fullDescription": "Descripción ampliada del proyecto, mecánicas principales, motor (Unity / C#) y dirección artística.",
+    "video": "assets/videos/proyecto2.mp4",
+    "fallbackColor": "#E2634A",
+    "repoUrl": ""
+  },
+  {
+    "id": "proyecto3",
+    "title": "PROYECTO 03",
+    "shortConcept": "Descripción breve del concepto jugable en una o dos líneas.",
+    "fullDescription": "Descripción ampliada del proyecto, mecánicas principales, motor (Unity / C#) y dirección artística.",
+    "video": "assets/videos/proyecto3.mp4",
+    "fallbackColor": "#6BC46D",
+    "repoUrl": ""
+  }
+]

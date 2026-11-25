@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ALYSAURIO — Portafolio</title>
+  <meta name="description" content="Portafolio interactivo de Alysaurio: desarrollador de videojuegos, artista conceptual y pixel art.">
+  <meta name="theme-color" content="#121315">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css">
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+</head>
+<body data-state="HERO_TEXT">
+  <canvas id="gl" aria-hidden="true"></canvas>
+
+  <main id="page">
+    <section id="hero" aria-label="Portada"><h1 class="sr-only">ALYSAURIO</h1></section>
+    <section id="ring" aria-label="Proyectos"><h2 class="sr-only">Proyectos</h2></section>
+    <section id="about" aria-label="Sobre mí y contacto">
+      <div class="about-grid">
+        <div class="about-col about-left">
+          <h2 class="eyebrow">// SOBRE MÍ</h2>
+          <p class="about-text">
+            Estudiante en <strong>Tecsup</strong> y desarrollador de videojuegos enfocado en unir la programación con la dirección visual.
+            He desarrollado <strong>4 videojuegos en Unity</strong> con <strong>C#</strong>, participando tanto en la lógica jugable como en el apartado artístico.
+            Como <strong>artista conceptual y diseñador de personajes</strong>, adapto mi trabajo a distintos estilos visuales —incluido el <strong>Pixel Art</strong>—
+            mientras continúo formándome con el objetivo de especializarme en <strong>Animación 2D</strong>.
+          </p>
+          <dl class="spec">
+            <div><dt>Motor y código</dt><dd>Unity · C# (Intermedio)</dd></div>
+            <div><dt>Arte y diseño</dt><dd>Concept Art · Diseño de Personajes · Pixel Art · En formación hacia Animación 2D</dd></div>
+            <div><dt>Experiencia</dt><dd>4 videojuegos desarrollados en Unity</dd></div>
+            <div><dt>Idiomas</dt><dd>Español (Nativo) · Inglés (Básico)</dd></div>
+          </dl>
+        </div>
+        <div class="about-col about-right">
+          <h2 class="eyebrow">// CONTACTO</h2>
+          <div class="contact-row">
+            <span class="label">GitHub</span>
+            <a class="link" href="https://github.com/Alysaurio" target="_blank" rel="noopener noreferrer">github.com/Alysaurio ↗</a>
+          </div>
+          <div class="contact-row">
+            <span class="label">Correo electrónico</span>
+            <span id="email-text" class="email">[correo-pendiente@ejemplo.com]</span>
+            <button id="copy-email" class="btn" type="button">Copiar correo</button>
+            <span id="copy-status" class="copy-status" role="status" aria-live="polite"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <p id="hero-sub">Desarrollador en desarrollo: convierto bocetos, píxeles y C# en pequeños mundos jugables.</p>
+  <div id="scroll-hint">SCROLL ↓</div>
+
+  <div id="preview-title" aria-hidden="true">
+    <span class="pt-title"></span>
+    <span class="pt-hint">CLIC PARA ABRIR</span>
+  </div>
+
+  <div id="detail-hint">SCROLL O CLIC FUERA PARA VOLVER</div>
+  <aside id="detail" aria-hidden="true">
+    <h2 id="d-title"></h2>
+    <p id="d-desc"></p>
+    <div id="d-repo-wrap"></div>
+  </aside>
+
+  <div id="fatal" hidden></div>
+  <noscript><p class="fatal-static">Este portafolio necesita JavaScript y WebGL2.</p></noscript>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
