@@ -1,4 +1,4 @@
-// shaders.js — atlas tipográfico + GLSL: capa ASCII de grilla fija, fondo ASCII de vídeo y caja de vídeo con escáner graduado.
+// shaders.js — atlas tipográfico + GLSL: capa ASCII fija (+ horizonte de eventos), fondo ASCII (+ blackout) y escáner graduado.
 export const DEFAULT_CHARSET = ['.', ':', ';', '=', '+', 'x', '#', '%', '@'];
 export const ATLAS_CELL = 48;
 
@@ -42,13 +42,16 @@ export const QUAD_VS = /* glsl */`
 varying vec2 vUv;
 void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
-/* Capa ASCII de grilla fija: cada celda lee (rgb, glifo+alfa) de la textura de datos que rellena el splatting de partículas. */
+/* Capa ASCII de grilla fija + horizonte de eventos (núcleo hueco #000000 con borde incandescente sutil en HERO_TEXT). */
 export const GRID_FS = /* glsl */`
 ${COMMON}
 uniform sampler2D tGrid;
 uniform vec2 uGrid;
 uniform float uCell;
 uniform float uDpr;
+uniform vec2 uBhPos;        // coords CSS (y hacia arriba)
+uniform float uBhR;         // radio del horizonte de eventos (0 = inactivo)
+uniform float uBhRim;       // intensidad del aro fotónico exterior
 varying vec2 vUv;
 void main(){
   vec2 frag = gl_FragCoord.xy / uDpr;
@@ -58,11 +61,28 @@ void main(){
   float al = (d.a - g) / 0.99;
   float ga = glyphAlpha(g, fract(frag / uCell), uCell * uDpr);
   float a = clamp(ga * al * 1.25, 0.0, 1.0);
+  vec3 col = d.rgb;
+
+  if (uBhR > 0.5) {
+    float db = length(frag - uBhPos);
+    // núcleo hueco negro puro (#000000)
+    float hole = 1.0 - smoothstep(uBhR - 1.5, uBhR + 0.8, db);
+    // borde exterior sutilmente incandescente en blanco
+    float rim = exp(-pow((db - (uBhR + 1.2)) / 3.4, 2.0)) * uBhRim;
+    if (hole > 0.005 || rim > 0.01) {
+      vec3 gRgb = col * a;
+      vec3 outRgb = mix(gRgb + vec3(rim), vec3(0.0), hole);
+      float outA = max(hole, clamp(a + rim, 0.0, 1.0));
+      if (outA < 0.02) discard;
+      gl_FragColor = vec4(outRgb / max(outA, 0.001), outA);
+      return;
+    }
+  }
   if (a < 0.03) discard;
-  gl_FragColor = vec4(d.rgb, a);
+  gl_FragColor = vec4(col, a);
 }`;
 
-/* Fondo: filtro ASCII/semitono del vídeo (con crossfade A→B) + tinte ambiental + grano. */
+/* Fondo: filtro ASCII/semitono del vídeo (con crossfade A→B) + tinte ambiental + grano + blackout del agujero negro. */
 export const BG_FS = /* glsl */`
 ${COMMON}
 uniform sampler2D tA;
@@ -77,11 +97,13 @@ uniform vec3 uBase;
 uniform vec3 uTint;
 uniform float uTintAmt;
 uniform float uVAspect;
+uniform float uBlackout;    // 0 = normal, 1 = vacío negro puro (#000000) durante el clímax del agujero negro
 varying vec2 vUv;
 void main(){
   vec2 frag = gl_FragCoord.xy / uDpr;
   vec3 col = mix(uBase, uTint, uTintAmt);
-  if (uBgAmt > 0.003) {
+  float vis = 1.0 - uBlackout;
+  if (uBgAmt > 0.003 && vis > 0.003) {
     float cs = 9.0 * uSimplify;
     vec2 cc = (floor(frag / cs) + 0.5) * cs;
     vec2 uv = coverUV(cc, uRes * 0.5, uRes * 0.5, uVAspect);
@@ -93,6 +115,7 @@ void main(){
     col += (v * 0.035 + v * a * 0.30) * uBgAmt * vig;
   }
   col += (hash12(gl_FragCoord.xy + fract(uTime) * 91.7) - 0.5) * 0.05;   // grano ~2.5 %
+  col *= vis;
   gl_FragColor = vec4(col, 1.0);
 }`;
 
@@ -168,10 +191,9 @@ void main(){
 
     if (wEnv > 0.002) {
       float boost = uPulse * (0.9 + 0.35 * sin(uTime * 18.0 - d * 0.11));
-      // pesos armónicos entre 3 grillas fijas en espacio del vídeo (cero vibración al mover el cursor)
-      float wCore = 1.0 - smoothstep(0.20, 0.48, rNorm);        // núcleo cercano al cursor: celda = uGridCell (~7 px)
-      float wOuter = smoothstep(0.50, 0.80, rNorm);             // borde exterior: micro-caracteres (~3.6 px)
-      float wMid = max(0.0, 1.0 - wCore - wOuter);              // transición intermedia (~5.2 px)
+      float wCore = 1.0 - smoothstep(0.20, 0.48, rNorm);
+      float wOuter = smoothstep(0.50, 0.80, rNorm);
+      float wMid = max(0.0, 1.0 - wCore - wOuter);
 
       float csCore = max(uGridCell, 5.0);
       float csMid  = csCore * 0.74;
@@ -192,7 +214,6 @@ void main(){
         gColSum += s0.rgb * s0.a * wOuter; gAlp += s0.a * wOuter;
       }
       vec3 gCol = gAlp > 0.001 ? gColSum / gAlp : col;
-      // fondo de celda apenas oscurecido de forma translúcida (sin manchas negras opacas)
       vec3 base = col * (1.0 - 0.16 * wEnv);
       col = mix(base, gCol, clamp(gAlp * wEnv * 1.12, 0.0, 1.0));
     }

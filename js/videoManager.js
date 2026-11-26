@@ -160,6 +160,7 @@ export class VideoManager {
   }
 
   getTexture(i) { return this.items[i].texture; }
+  getSource(i) { const it = this.items[i]; return it.usingVideo ? it.video : it.canvas; }
   getColor(i) { return this.items[i].display; }
   restart(i) { const it = this.items[i]; if (it && it.usingVideo) { try { it.video.currentTime = 0; } catch (e) { /* noop */ } } }
 
