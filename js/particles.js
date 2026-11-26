@@ -204,12 +204,17 @@ function sdfScene(S, x, y) {
     if (dd < d) { d = dd; tComp = 2; }
   }
   if (S.L > 2) {
-    let f = (y + S.ropeH) / (2 * S.ropeH) * (ROPE_N - 1);
+    const yLoc = y - S.lineY;
+    let f = (yLoc + S.ropeH) / (2 * S.ropeH) * (ROPE_N - 1);
     f = f < 0 ? 0 : f > ROPE_N - 1.001 ? ROPE_N - 1.001 : f;
     const i0 = f | 0, fr = f - i0;
     const off = S.ro[i0] * (1 - fr) + S.ro[i0 + 1] * fr;
-    const ex = Math.abs(x - off), ay = Math.abs(y) - S.L, ey = ay > 0 ? ay : 0;
-    const dd = Math.sqrt(ex * ex + ey * ey) - S.lrb;
+    // ahusamiento suave en ambos extremos (especialmente punta superior tipo llama de vela)
+    let tTop = (S.L - yLoc) / 48; tTop = tTop < 0 ? 0 : tTop > 1 ? 1 : tTop; tTop = 0.24 + 0.76 * tTop * tTop * (3 - 2 * tTop);
+    let tBot = (S.L + yLoc) / 36; tBot = tBot < 0 ? 0 : tBot > 1 ? 1 : tBot; tBot = 0.34 + 0.66 * tBot * tBot * (3 - 2 * tBot);
+    const lrbEff = S.lrb * (tTop < tBot ? tTop : tBot);
+    const ex = Math.abs(x - off), ay = Math.abs(yLoc) - S.L, ey = ay > 0 ? ay : 0;
+    const dd = Math.sqrt(ex * ex + ey * ey) - lrbEff;
     if (dd < d) { d = dd; tComp = 3; }
   }
   return d;
@@ -335,6 +340,107 @@ function evalFire(h) {
   }
 }
 
+/* ---------- Interferencia cromática irregular en ALYSAURIO (domain-warped, sin bandas arcoíris) ---------- */
+const HERO_PAL = [
+  [0.361, 0.882, 1.000], // #5CE1FF cian eléctrico
+  [0.353, 0.510, 1.000], // #5A82FF azul cobalto
+  [1.000, 0.757, 0.302], // #FFC14D ámbar luminoso
+  [1.000, 0.435, 0.349], // #FF6F59 coral
+];
+let hcR = 1, hcG = 1, hcB = 1, hcAmt = 0;
+function evalHeroChaos(x, y, t) {
+  const sx = x * 0.017, sy = y * 0.021;
+  // domain warping con frecuencias no armónicas para evitar barridos regulares
+  const wx = sx + 0.88 * Math.sin(sy * 1.73 + t * 0.67 + Math.cos(sx * 1.19 - t * 0.43));
+  const wy = sy + 0.88 * Math.cos(sx * 1.61 - t * 0.59 + Math.sin(sy * 1.37 + t * 0.51));
+  const n1 = Math.sin(wx * 2.31 - wy * 1.87 + t * 0.83) * Math.cos(wx * 1.47 + wy * 2.63 - t * 0.71);
+  const n2 = Math.sin(wx * 4.17 + wy * 3.29 + t * 1.37) * Math.sin(wx * 2.89 - wy * 3.71 - t * 1.09);
+  const env = 0.5 + 0.5 * Math.sin(wx * 1.13 + wy * 0.91 - t * 0.53) * Math.cos(wx * 0.79 - wy * 1.41 + t * 0.39);
+  const raw = Math.abs(n1 * 0.60 + n2 * 0.40);
+  const hSel = (Math.sin(wx * 3.11 + wy * 2.77 + t * 0.77) + Math.cos(wx * 2.13 - wy * 3.53 - t * 0.61)) * 0.5;
+  let idxF = ((hSel + 1.0) * 2.0) % 4;
+  if (idxF < 0) idxF += 4;
+  const i0 = idxF | 0, i1 = (i0 + 1) & 3, fr = idxF - i0;
+  const c0 = HERO_PAL[i0], c1 = HERO_PAL[i1];
+  hcR = c0[0] + (c1[0] - c0[0]) * fr;
+  hcG = c0[1] + (c1[1] - c0[1]) * fr;
+  hcB = c0[2] + (c1[2] - c0[2]) * fr;
+  let a = (raw * (0.55 + 0.68 * env) - 0.20) / 0.58;
+  a = a < 0 ? 0 : a > 1 ? 1 : a;
+  hcAmt = a * a * (3 - 2 * a);
+}
+
+/* ---------- Bisel metálico anodizado sutil (titanio-platino #D8DFE8 / champán #EDE6D6 / dorado #E5C98E) ---------- */
+let mbR = 1, mbG = 1, mbB = 1;
+function applyMetallicBevel(r, g, b, edgeW, ang, t) {
+  if (edgeW <= 0.002) { mbR = r; mbG = g; mbB = b; return; }
+  // dos reflejos especulares lentos deslizándose como metal cepillado recibiendo luz rasante
+  const sp1 = Math.pow(0.5 + 0.5 * Math.cos(ang * 2.0 - t * 0.42 + 0.6), 3.0);
+  const sp2 = Math.pow(0.5 + 0.5 * Math.cos(ang * 3.0 + t * 0.27 - 1.1), 2.5);
+  const spec = 0.42 + 0.58 * Math.min(1, sp1 * 0.78 + sp2 * 0.48);
+  const warmT = 0.5 + 0.5 * Math.sin(ang * 2.0 + t * 0.31);
+  let mR = 0.847 + (0.929 - 0.847) * warmT;
+  let mG = 0.875 + (0.902 - 0.875) * warmT;
+  let mB = 0.910 + (0.839 - 0.910) * warmT;
+  const gAmt = sp1 * 0.42;
+  mR += (0.898 - mR) * gAmt; mG += (0.788 - mG) * gAmt; mB += (0.557 - mB) * gAmt;
+  // mezcla contenida (máx. ~38 % en el filo especular) sin cubrir el color ADN ni los degradados
+  const mix = edgeW * (0.19 + 0.19 * spec);
+  mbR = r + (mR - r) * mix;
+  mbG = g + (mG - g) * mix;
+  mbB = b + (mB - b) * mix;
+}
+
+/* ---------- Paleta caótica cálido/frío para la columna llama de vela (ABOUT_DIVIDER) ---------- */
+const CANDLE_WARM = [
+  [1.000, 0.722, 0.302], // #FFB84D ámbar dorado
+  [1.000, 0.471, 0.220], // #FF7838 fuego suave
+  [1.000, 0.369, 0.424], // #FF5E6C destello coral
+];
+const CANDLE_COOL = [
+  [0.298, 0.878, 1.000], // #4CE0FF cian eléctrico
+  [0.357, 0.545, 1.000], // #5B8BFF azul plasma
+  [0.502, 0.420, 1.000], // #806BFF violeta-azulado base/bordes
+];
+let cdR = 1, cdG = 1, cdB = 1;
+function evalCandleColor(x, y, yNorm, distFrac, agit, t) {
+  const sy = y * 0.025 - t * 2.25;
+  const sx = x * 0.044;
+  const wy = sy + 0.78 * Math.sin(sx * 1.93 + sy * 1.37 + t * 0.88);
+  const wx = sx + 0.66 * Math.cos(sy * 1.67 - sx * 1.21 - t * 1.07);
+  // balance caótico cálido ↔ frío con sesgo azulado/violeta sutil en la base y bordes exteriores
+  const baseCoolBias = (1 - Math.min(1, yNorm / 0.32)) * 0.38 + Math.min(1, distFrac) * 0.16;
+  const wc = Math.sin(wx * 2.17 + wy * 1.89) * 0.58 + Math.cos(wx * 3.41 - wy * 2.73 + t * 1.45) * 0.42 - baseCoolBias;
+  let coolW = (0.12 - wc) / 0.62; coolW = coolW < 0 ? 0 : coolW > 1 ? 1 : coolW;
+  coolW = coolW * coolW * (3 - 2 * coolW);
+
+  // selección dentro de tonos cálidos y fríos con desfase RGB tipo Silexars
+  const wSel = 0.5 + 0.5 * Math.sin(wx * 2.83 - wy * 2.41 + t * 1.13);
+  const wi = wSel < 0.5 ? 0 : 1, wf = wSel < 0.5 ? wSel * 2 : (wSel - 0.5) * 2;
+  const wa = CANDLE_WARM[wi], wb = CANDLE_WARM[wi + 1];
+  const wr = wa[0] + (wb[0] - wa[0]) * wf, wg = wa[1] + (wb[1] - wa[1]) * wf, wbb = wa[2] + (wb[2] - wa[2]) * wf;
+
+  const cSel = 0.5 + 0.5 * Math.cos(wx * 2.57 + wy * 2.91 - t * 1.31);
+  const cBias = Math.min(1, cSel * 0.75 + (1 - Math.min(1, yNorm / 0.38)) * 0.35);
+  const ci = cBias < 0.5 ? 0 : 1, cf = cBias < 0.5 ? cBias * 2 : (cBias - 0.5) * 2;
+  const ca = CANDLE_COOL[ci], cb = CANDLE_COOL[ci + 1];
+  const cr = ca[0] + (cb[0] - ca[0]) * cf, cg = ca[1] + (cb[1] - ca[1]) * cf, cbb = ca[2] + (cb[2] - ca[2]) * cf;
+
+  const pR = wr + (cr - wr) * coolW;
+  const pG = wg + (cg - wg) * coolW;
+  const pB = wbb + (cbb - wbb) * coolW;
+
+  // núcleo interno blanco incandescente (#F5F7FA); calma (~35–45 % bordes) en reposo → viva (~78–90 %) al agitar
+  let env = (distFrac - 0.24) / 0.68; env = env < 0 ? 0 : env > 1 ? 1 : env;
+  env = env * env * (3 - 2 * env);
+  const restMix = 0.08 + 0.36 * env;
+  const agitMix = 0.42 + 0.48 * Math.min(1, env + 0.35);
+  const mix = restMix + (agitMix - restMix) * agit;
+  cdR = 0.961 + (pR - 0.961) * mix;
+  cdG = 0.969 + (pG - 0.969) * mix;
+  cdB = 0.980 + (pB - 0.980) * mix;
+}
+
 function propagate(mask, gw, gh) {
   const nx = new Int16Array(gw * gh).fill(-1), ny = new Int16Array(gw * gh).fill(-1);
   for (let i = 0; i < mask.length; i++) if (mask[i]) { nx[i] = i % gw; ny[i] = (i / gw) | 0; }
@@ -432,7 +538,7 @@ export class ParticleSystem {
     this.mesh.frustumCulled = false; this.mesh.renderOrder = 3;
 
     this.setProjects(N);
-    this.ropeO = new Float32Array(ROPE_N); this.ropeV = new Float32Array(ROPE_N);
+    this.ropeO = new Float32Array(ROPE_N); this.ropeV = new Float32Array(ROPE_N); this.ropeE = new Float32Array(ROPE_N);
     this.S.ro = this.ropeO;
     this.tgw = 1; this.tgh = 1; this.tMask = new Uint8Array(1);
     this.tIn = null; this.tOut = null; this.textArea = 20000; this.textHalfW = 300;
@@ -456,7 +562,7 @@ export class ParticleSystem {
       curInsideRect: false, curWasInsideRect: false,
       pusher: null,
       jx: 0, jy: 0, jr: 0, jtx: 0, jty: 0, jtr: 0,
-      L: 0, LT: 0, lrb: 13, ropeH: 400, ro: null,
+      L: 0, LT: 0, lineY: 0, lrb: 13, ropeH: 400, ro: null,
       ringActive: false, charge: 0, conqSeg: -1, conqP: 0, conqRawP: 0,
     };
   }
@@ -761,26 +867,54 @@ export class ParticleSystem {
       S.bcr = t.box.cr; S.brb = t.box.rb; S.boff = t.box.off; S.boxD = t.box.d; S.vidR = t.box.vidR || 0; S.local = t.box.local;
     } else { S.boxOn = false; S.vidR = 0; }
     S.jtx = t.junction.x; S.jty = t.junction.y; S.jtr = t.junction.r;
-    S.LT = t.lineL; S.lrb = t.lrb || 13;
+    S.LT = t.lineL; S.lineY = t.lineY || 0; S.lrb = t.lrb || 13;
+    if (t.lineL > 2) S.ropeH = t.lineL;
     this.cursorEnabled = t.enabled;
   }
 
   _rope(dt, cur) {
-    const S = this.S, n = ROPE_N, o = this.ropeO, v = this.ropeV;
-    const dy = (2 * S.ropeH) / (n - 1), c2 = (620 / dy) ** 2, steps = 3, h = dt / steps;
+    const S = this.S, n = ROPE_N, o = this.ropeO, v = this.ropeV, e = this.ropeE;
+    const maxX = 72; // límite horizontal seguro: nunca invade los textos laterales («Sobre mí» / «Contacto»)
+    const dy = (2 * S.ropeH) / (n - 1), c2 = (340 / dy) ** 2, steps = 4, h = dt / steps;
+    const t = S.time;
+    const eDecay = Math.exp(-2.8 * dt);
+    for (let k = 0; k < n; k++) e[k] *= eDecay;
+
     if (cur.valid && S.LT > 50) {
-      for (let k = 0; k < n; k++) {
-        const ddy = Math.abs(-S.ropeH + k * dy - cur.y);
-        if (ddy > 130) continue;
-        const w = (1 - ddy / 130) ** 2, prox = Math.max(0, 1 - Math.abs(cur.x - o[k]) / 170), wp = w * prox;
-        v[k] += cur.vx * 0.16 * wp;
-        v[k] += (Math.max(-170, Math.min(170, cur.x)) - o[k]) * 14 * wp * dt;
+      const cSp = Math.hypot(cur.vx, cur.vy);
+      for (let k = 1; k < n - 1; k++) {
+        const yNode = S.lineY - S.ropeH + k * dy;
+        const ddy = Math.abs(yNode - cur.y);
+        if (ddy > 96) continue;
+        const w = (1 - ddy / 96) ** 2;
+        const prox = Math.max(0, 1 - Math.abs(cur.x - o[k]) / 105);
+        const wp = w * prox;
+        if (wp > 0.002) {
+          // empuje lateral moderado + excitación térmica local (sin latigazo elástico excesivo)
+          const clampedX = Math.max(-maxX, Math.min(maxX, cur.x));
+          v[k] += cur.vx * 0.085 * wp + (clampedX - o[k]) * 10 * wp * dt;
+          e[k] = Math.min(1, e[k] + wp * Math.min(1, 0.25 + cSp / 650) * 0.85);
+        }
       }
     }
-    const damp = Math.exp(-1.4 * h);
+    // amortiguamiento alto (casi crítico) + restauración rápida (~1.8×) + convección ascendente de llama de vela
+    const damp = Math.exp(-11.5 * h);
     for (let s = 0; s < steps; s++) {
-      for (let k = 1; k < n - 1; k++) v[k] += (c2 * (o[k - 1] + o[k + 1] - 2 * o[k]) - 5 * o[k]) * h;
-      for (let k = 1; k < n - 1; k++) { v[k] *= damp; o[k] += v[k] * h; }
+      for (let k = 1; k < n - 1; k++) {
+        const u = k / (n - 1);
+        const env = Math.sin(u * Math.PI);
+        // micro-ondulación térmica ascendente en reposo (fluye de abajo hacia arriba como llama tranquila)
+        const idle = (Math.sin(u * 6.5 - t * 2.4) * 2.2 + Math.sin(u * 11.3 - t * 3.7) * 1.1) * env;
+        const lap = c2 * (o[k - 1] + o[k + 1] - 2 * o[k]);
+        const advectUp = (o[k - 1] - o[k]) * 18; // arrastre ascendente suave hacia la punta de la vela
+        v[k] += (lap + advectUp - 42 * (o[k] - idle)) * h;
+      }
+      for (let k = 1; k < n - 1; k++) {
+        v[k] *= damp;
+        o[k] += v[k] * h;
+        if (o[k] > maxX) { o[k] = maxX; v[k] *= 0.25; }
+        else if (o[k] < -maxX) { o[k] = -maxX; v[k] *= 0.25; }
+      }
       o[0] = o[n - 1] = 0; v[0] = v[n - 1] = 0;
     }
   }
@@ -1047,14 +1181,14 @@ export class ParticleSystem {
           } else {
             vx *= Math.exp(-12 * dt); vy *= Math.exp(-12 * dt);
             vxA[i] = vx; vyA[i] = vy;
-            // letras aún intactas conservan la dispersión óptica estilo Silexars (núcleo blanco + bordes prismáticos)
+            // letras aún intactas conservan la interferencia cromática irregular (núcleo blanco + racimos prismáticos)
             this._textEval(x, y);
-            evalSilexars(x / sxHalfW, y / sxHalfH, tNow);
-            let cw = (-tSd - 2.0) / 11.0; cw = cw < 0 ? 0 : cw > 1 ? 1 : cw; cw = cw * cw * (3 - 2 * cw);
-            const chroma = (0.52 + 0.11 * sxCrest) * (1 - cw) + 0.21 * cw;
-            this.cr[i] = 0.949 + (sxR - 0.949) * chroma;
-            this.cg[i] = 0.957 + (sxG - 0.957) * chroma;
-            this.cb[i] = 0.973 + (sxB - 0.973) * chroma;
+            evalHeroChaos(x, y, tNow);
+            let cw = (-tSd - 2.0) / 10.5; cw = cw < 0 ? 0 : cw > 1 ? 1 : cw; cw = cw * cw * (3 - 2 * cw);
+            const chroma = (0.14 + 0.56 * hcAmt) * (1 - cw) + (0.06 + 0.14 * hcAmt) * cw;
+            this.cr[i] = 0.949 + (hcR - 0.949) * chroma;
+            this.cg[i] = 0.957 + (hcG - 0.957) * chroma;
+            this.cb[i] = 0.973 + (hcB - 0.973) * chroma;
             bhTemp[i] = 0;
             this.en[i] = Math.max(0, this.en[i] - dt * 3);
             continue;
@@ -1385,6 +1519,13 @@ export class ParticleSystem {
     const mg = C.edgeMargin, EF = C.edgeForce, inset = C.inset, arrR = C.arrivalRadius;
     const local = S.local, isDetail = S.isDetail && S.boxOn;
     const aritoBarrier = !isDetail && S.boxOn && S.vidR > 1;
+    const aboutOn = S.mode === 1 && !S.ringActive && !isDetail && S.L > 2;
+    const aboutTouch = aboutOn && cur.valid && curSl > 0.5 && curSp > 35;
+    const aboutMaxX = 76;
+    const aboutYMin = S.lineY - S.L - 6, aboutYMax = S.lineY + S.L + 16;
+    const aboutRetK = 380, aboutRetC = 2 * 1.05 * Math.sqrt(aboutRetK);
+    const aboutHoldDamp = Math.exp(-12.5 * dt);
+    const ropeO = this.ropeO, ropeE = this.ropeE;
     const sxHalfW = Math.max(220, this.textHalfW * 1.15), sxHalfH = Math.max(90, H * 0.22);
     const bhTemp = this.bhTemp, heroCk = 1 - Math.exp(-7.5 * dt);
     const pt = this._pt;
@@ -1423,6 +1564,21 @@ export class ParticleSystem {
           vx += curUx * mag + (rnd[i] - 0.5) * mag * 0.22;
           vy += curUy * mag + (Math.random() - 0.5) * mag * 0.22;
           ph = 1; t1[i] = 0; arrived[i] = 0;
+        }
+      }
+
+      // 2b) perturbación térmica tipo llama de vela en ABOUT_DIVIDER (empuje moderado + flotabilidad ascendente + rizo)
+      if (aboutTouch) {
+        const l = ((x - cur.px) * curSx + (y - cur.py) * curSy) / curSl2, s = l < 0 ? 0 : l > 1 ? 1 : l;
+        const dx = x - (cur.px + curSx * s), dy = y - (cur.py + curSy * s), d2 = dx * dx + dy * dy;
+        const cR = 64, cR2 = cR * cR;
+        if (d2 < cR2) {
+          const d = Math.sqrt(d2) + 1e-4, f = 1 - d / cR, f2 = f * f;
+          const mag = Math.min(curSp, 1600) * 0.26 * f2;
+          const upKick = (130 + Math.min(curSp, 1400) * 0.24) * f2 * (0.7 + 0.6 * rnd[i]);
+          vx += curUx * mag * 0.62 + (dx / d) * mag * 0.28 + (rnd[i] - 0.5) * 75 * f2;
+          vy += upKick + Math.max(0, curUy) * mag * 0.35;
+          ph = 1; t1[i] = 0; arrived[i] = 0; hasT[i] = 0; heat[i] = Math.max(heat[i], 0.82 * f);
         }
       }
 
@@ -1493,8 +1649,9 @@ export class ParticleSystem {
           bhTemp[i] = Math.max(0, bhTemp[i] - dt * 1.25);
           evalFire(bhTemp[i]);
           const wCool = bhTemp[i] > 0.01 ? Math.min(1, bhTemp[i] * 1.35) : 0;
-          evalSilexars(x / sxHalfW, y / sxHalfH, t);
-          const tr = 0.949 + (sxR - 0.949) * 0.42, tg = 0.957 + (sxG - 0.957) * 0.42, tb = 0.973 + (sxB - 0.973) * 0.42;
+          evalHeroChaos(x, y, t);
+          const chM = 0.14 + 0.42 * hcAmt;
+          const tr = 0.949 + (hcR - 0.949) * chM, tg = 0.957 + (hcG - 0.957) * chM, tb = 0.973 + (hcB - 0.973) * chM;
           ccr[i] = tr + (fiR - tr) * wCool; ccg[i] = tg + (fiG - tg) * wCool; ccb[i] = tb + (fiB - tb) * wCool;
         }
         if (timer[i] <= 0) { ph = 2; timer[i] = C.apexDelayMs / 1000 * (0.75 + rnd[i] * 0.4); }
@@ -1502,41 +1659,56 @@ export class ParticleSystem {
         en[i] = Math.min(1, Math.hypot(vx, vy) / 2200) * 0.6;
         continue;
       } else if (ph === 1) {                              // FASE 1 — expansión volumétrica tipo «aro de humo» (retorno = 0 %)
-        if (isDetail) {
-          // conserva intacta la estela de salida en DETAIL_RECT
-          ax += prx * 900 + C.turbulence * Math.sin(y * 0.021 + t * 3.1 + rnd[i] * 6.28);
-          ay += pry * 900 + C.turbulence * Math.cos(x * 0.019 + t * 2.7 + rnd[i] * 6.28);
-          if (sw > 0.01) { const k = xsphK * Math.min(1, sw); vx += (svx / sw - vx) * k; vy += (svy / sw - vy) * k; }
-          vx += ax * dt; vy += ay * dt; vx *= dragK; vy *= dragK;
+        if (aboutOn) {
+          // volutas ascendentes de llama de vela: flotabilidad vertical + leve rizo curl y reintegración rápida
+          const cP = x * 0.042 + y * 0.028 - t * 3.4 + rnd[i] * 6.28;
+          ax += Math.sin(cP) * 260 + prx * 420;
+          ay += 540 + Math.cos(cP * 1.23) * 190 + pry * 320;
+          vx = (vx + ax * dt) * Math.exp(-4.2 * dt);
+          vy = (vy + ay * dt) * Math.exp(-3.4 * dt);
           puff[i] *= puffDecay;
+          const yNorm = Math.max(0, Math.min(1, (y - (S.lineY - S.L)) / Math.max(1, 2 * S.L)));
+          evalCandleColor(x, y, yNorm, 0.85, Math.min(1, 0.68 + Math.hypot(vx, vy) / 700), t);
+          ccr[i] = cdR; ccg[i] = cdG; ccb[i] = cdB;
+          t1[i] += dt;
+          if (t1[i] > 0.28 + rnd[i] * 0.10) { ph = 3; heat[i] = Math.max(heat[i], 0.65); arrived[i] = 0; settle[i] = 0.22; }
         } else {
-          // curl noise 2D libre de divergencia (volutas suaves) + presión de expansión lateral/radial
-          const p1x = 0.017 * x + 1.3 * t, p1y = 0.017 * y - 1.1 * t;
-          const p2 = 0.031 * y - 0.023 * x + 2.1 * t;
-          const c2cos = Math.cos(p2);
-          const curlX = (-Math.sin(p1x) * Math.sin(p1y) + 0.95 * c2cos) * C.smokeCurlStrength;
-          const curlY = (-Math.cos(p1x) * Math.cos(p1y) + 0.72 * c2cos) * C.smokeCurlStrength;
-          // expansión gaseosa: empuje de presión de vecinos + divergencia radial suave
-          ax += prx * 1450 + rx * 420 + curlX;
-          ay += pry * 1450 + ry * 420 + curlY;
-          // cohesión direccional XSPH reducida al dispersarse rápido (evita «hilos» rígidos)
-          if (sw > 0.01) {
-            const xScale = 0.16 + 0.24 * Math.min(1, t1[i] / 0.55);
-            const k = xsphK * xScale * Math.min(1, sw);
-            vx += (svx / sw - vx) * k; vy += (svy / sw - vy) * k;
+          if (isDetail) {
+            // conserva intacta la estela de salida en DETAIL_RECT
+            ax += prx * 900 + C.turbulence * Math.sin(y * 0.021 + t * 3.1 + rnd[i] * 6.28);
+            ay += pry * 900 + C.turbulence * Math.cos(x * 0.019 + t * 2.7 + rnd[i] * 6.28);
+            if (sw > 0.01) { const k = xsphK * Math.min(1, sw); vx += (svx / sw - vx) * k; vy += (svy / sw - vy) * k; }
+            vx += ax * dt; vy += ay * dt; vx *= dragK; vy *= dragK;
+            puff[i] *= puffDecay;
+          } else {
+            // curl noise 2D libre de divergencia (volutas suaves) + presión de expansión lateral/radial
+            const p1x = 0.017 * x + 1.3 * t, p1y = 0.017 * y - 1.1 * t;
+            const p2 = 0.031 * y - 0.023 * x + 2.1 * t;
+            const c2cos = Math.cos(p2);
+            const curlX = (-Math.sin(p1x) * Math.sin(p1y) + 0.95 * c2cos) * C.smokeCurlStrength;
+            const curlY = (-Math.cos(p1x) * Math.cos(p1y) + 0.72 * c2cos) * C.smokeCurlStrength;
+            // expansión gaseosa: empuje de presión de vecinos + divergencia radial suave
+            ax += prx * 1450 + rx * 420 + curlX;
+            ay += pry * 1450 + ry * 420 + curlY;
+            // cohesión direccional XSPH reducida al dispersarse rápido (evita «hilos» rígidos)
+            if (sw > 0.01) {
+              const xScale = 0.16 + 0.24 * Math.min(1, t1[i] / 0.55);
+              const k = xsphK * xScale * Math.min(1, sw);
+              vx += (svx / sw - vx) * k; vy += (svy / sw - vy) * k;
+            }
+            vx += ax * dt; vy += ay * dt; vx *= dragK; vy *= dragK;
+            const spNow2 = vx * vx + vy * vy;
+            if (spNow2 > dispVmax2) { const sc = dispVmax / Math.sqrt(spNow2); vx *= sc; vy *= sc; }
+            // aumenta el volumen de splatting (puffFactor 0 → 1) conforme se expande lejos del aro
+            const dRing = Math.abs(Math.hypot(x, y) - S.R);
+            const pTgt = Math.min(1, t1[i] * 2.2 + Math.max(0, dRing - S.rb * 0.8) / 72);
+            puff[i] += (pTgt - puff[i]) * puffGrowK;
           }
-          vx += ax * dt; vy += ay * dt; vx *= dragK; vy *= dragK;
-          const spNow2 = vx * vx + vy * vy;
-          if (spNow2 > dispVmax2) { const sc = dispVmax / Math.sqrt(spNow2); vx *= sc; vy *= sc; }
-          // aumenta el volumen de splatting (puffFactor 0 → 1) conforme se expande lejos del aro
-          const dRing = Math.abs(Math.hypot(x, y) - S.R);
-          const pTgt = Math.min(1, t1[i] * 2.2 + Math.max(0, dRing - S.rb * 0.8) / 72);
-          puff[i] += (pTgt - puff[i]) * puffGrowK;
-        }
-        t1[i] += dt;
-        const sp2 = vx * vx + vy * vy;
-        if ((sp2 < C.apexSpeed * C.apexSpeed && t1[i] > 0.1) || t1[i] > C.smokeMax) {
-          ph = 2; timer[i] = C.apexDelayMs / 1000 * (0.85 + rnd[i] * 0.3);
+          t1[i] += dt;
+          const sp2 = vx * vx + vy * vy;
+          if ((sp2 < C.apexSpeed * C.apexSpeed && t1[i] > 0.1) || t1[i] > C.smokeMax) {
+            ph = 2; timer[i] = C.apexDelayMs / 1000 * (0.85 + rnd[i] * 0.3);
+          }
         }
       } else if (ph === 2) {                              // pausa en el ápice (o escalonamiento 0–65 ms de micro-cúmulo)
         vx += ax * dt; vy += ay * dt;
@@ -1589,7 +1761,19 @@ export class ParticleSystem {
         } else if (comp >= 0 && sd < 1e8) {
           if (comp === 0 || comp === 2) {
             if (ph === 0 || arrived[i]) {
-              arcColor(S, x, y); ccr[i] = oR; ccg[i] = oG; ccb[i] = oB; waveE = oW;
+              arcColor(S, x, y);
+              let rr = oR, gg = oG, bb = oB;
+              // bisel metálico anodizado sutil en el borde interior/exterior (~22–25 %) del aro principal
+              if (comp === 0 && S.ringActive) {
+                const radF = Math.abs(Math.hypot(x, y) - S.R) / Math.max(1, S.rb);
+                if (radF > 0.72 && radF < 1.42) {
+                  let eIn = (radF - 0.72) / 0.28; eIn = eIn < 0 ? 0 : eIn > 1 ? 1 : eIn; eIn = eIn * eIn * (3 - 2 * eIn);
+                  let eOut = (1.42 - radF) / 0.26; eOut = eOut < 0 ? 0 : eOut > 1 ? 1 : eOut; eOut = eOut * eOut * (3 - 2 * eOut);
+                  applyMetallicBevel(rr, gg, bb, eIn * eOut, Math.atan2(y, x), t);
+                  rr = mbR; gg = mbG; bb = mbB;
+                }
+              }
+              ccr[i] = rr; ccg[i] = gg; ccb[i] = bb; waveE = oW;
             } else if (hasT[i]) {
               // micro-cúmulos y objetivos explícitos evalúan su ángulo destino sobre el aro (cero cambios al cruzar fronteras)
               arcColor(S, txA[i], tyA[i]); ccr[i] = oR; ccg[i] = oG; ccb[i] = oB; waveE = oW;
@@ -1603,6 +1787,22 @@ export class ParticleSystem {
           } else if (comp === 1) {
             arcColor(S, S.bx, S.by);
             let rr = oR, gg = oG, bb = oB;
+            // bisel metálico sutil en los contornos del «arito» (solo en RING_PREVIEW, sin tocar DETAIL_RECT)
+            if (S.boxD < 0.08 && S.vidR > 2 && (ph === 0 || arrived[i])) {
+              const adx = x - S.bx, ady = y - S.by, adist = Math.hypot(adx, ady);
+              const uR = (adist - S.vidR) / Math.max(1, S.brb);
+              let ew = 0;
+              if (uR < 0.26) { let u = (0.26 - uR) / 0.24; u = u < 0 ? 0 : u > 1 ? 1 : u; ew = u * u * (3 - 2 * u); }
+              else if (uR > 0.74 && uR < 1.38) {
+                let u1 = (uR - 0.74) / 0.26; u1 = u1 < 0 ? 0 : u1 > 1 ? 1 : u1;
+                let u2 = (1.38 - uR) / 0.24; u2 = u2 < 0 ? 0 : u2 > 1 ? 1 : u2;
+                ew = (u1 * u1 * (3 - 2 * u1)) * (u2 * u2 * (3 - 2 * u2));
+              }
+              if (ew > 0.002) {
+                applyMetallicBevel(rr, gg, bb, ew * (1 - S.boxD / 0.08), Math.atan2(ady, adx), t);
+                rr = mbR; gg = mbG; bb = mbB;
+              }
+            }
             if (local && S.boxD > 0.01) {
               let lu = (x - (S.bx - S.bhw)) / (2 * S.bhw), lv = ((S.by + S.bhh) - y) / (2 * S.bhh);
               lu = lu < 0 ? 0 : lu > 0.999 ? 0.999 : lu; lv = lv < 0 ? 0 : lv > 0.999 ? 0.999 : lv;
@@ -1611,18 +1811,30 @@ export class ParticleSystem {
               rr += (local[li] - rr) * bd; gg += (local[li + 1] - gg) * bd; bb += (local[li + 2] - bb) * bd;
             }
             ccr[i] = rr; ccg[i] = gg; ccb[i] = bb;
-          } else if (comp === 3) { ccr[i] = 0.9; ccg[i] = 0.9; ccb[i] = 0.92; }
-          else if (comp === 4) {
-            // dispersión cromática óptica estilo Silexars en HERO_TEXT (núcleo blanco #F2F4F8 + bordes prismáticos)
+          } else if (comp === 3) {
+            // columna llama de vela (ABOUT_DIVIDER): variación cromática caótica cálido/frío modulada por agitación
+            const yLoc = y - S.lineY;
+            const yNorm = Math.max(0, Math.min(1, (yLoc + S.L) / Math.max(1, 2 * S.L)));
+            let rf = (yLoc + S.ropeH) / (2 * S.ropeH) * (ROPE_N - 1);
+            rf = rf < 0 ? 0 : rf > ROPE_N - 1.001 ? ROPE_N - 1.001 : rf;
+            const ri = rf | 0;
+            const distAxis = Math.abs(x - ropeO[ri]);
+            const distFrac = Math.min(1.2, distAxis / Math.max(1, S.lrb));
+            const agit = Math.min(1, Math.max(ropeE[ri], Math.min(1, Math.hypot(vx, vy) / 480) * 0.85, ph === 3 ? 0.45 : 0));
+            evalCandleColor(x, y, yNorm, distFrac, agit, t);
+            ccr[i] = cdR; ccg[i] = cdG; ccb[i] = cdB;
+            waveE = agit * 0.42;
+          } else if (comp === 4) {
+            // interferencia cromática irregular en HERO_TEXT (núcleo blanco #F2F4F8 + racimos asimétricos)
             const rxC = (ph === 3 && hasT[i]) ? txA[i] : x;
             const ryC = (ph === 3 && hasT[i]) ? tyA[i] : y;
-            evalSilexars(rxC / sxHalfW, ryC / sxHalfH, t);
+            evalHeroChaos(rxC, ryC, t);
             let cw = 0.35;
-            if (ph === 0) { cw = (-sd - 2.0) / 11.0; cw = cw < 0 ? 0 : cw > 1 ? 1 : cw; cw = cw * cw * (3 - 2 * cw); }
-            const chroma = (0.52 + 0.11 * sxCrest) * (1 - cw) + 0.21 * cw;
-            let tr = 0.949 + (sxR - 0.949) * chroma;
-            let tg = 0.957 + (sxG - 0.957) * chroma;
-            let tb = 0.973 + (sxB - 0.973) * chroma;
+            if (ph === 0) { cw = (-sd - 2.0) / 10.5; cw = cw < 0 ? 0 : cw > 1 ? 1 : cw; cw = cw * cw * (3 - 2 * cw); }
+            const chroma = (0.14 + 0.56 * hcAmt) * (1 - cw) + (0.06 + 0.14 * hcAmt) * cw;
+            let tr = 0.949 + (hcR - 0.949) * chroma;
+            let tg = 0.957 + (hcG - 0.957) * chroma;
+            let tb = 0.973 + (hcB - 0.973) * chroma;
             if (bhTemp[i] > 0) {
               bhTemp[i] = Math.max(0, bhTemp[i] - dt * 1.45);
               evalFire(bhTemp[i]);
@@ -1642,6 +1854,16 @@ export class ParticleSystem {
             ax += (txA[i] - x) * C.detailHoldK;
             ay += (tyA[i] - y) * C.detailHoldK;
             vx = (vx + ax * dt) * detRest; vy = (vy + ay * dt) * detRest;
+          } else if (aboutOn) {
+            // reposo tipo llama de vela: convección ascendente suave + restauración horizontal ágil sin rebote
+            ay += 32 * (0.4 + 0.6 * rnd[i]) * Math.sin(t * 2.2 + y * 0.03 + rnd[i] * 6.28);
+            if (sd > 0 && sd < 1e8) {
+              const pull = Math.min(sd + 1, 500);
+              ax -= gx * C.holdStiffness * 1.85 * pull;
+              ay -= gy * C.holdStiffness * 1.35 * pull;
+            }
+            if (sd > 22 && sd < 1e8) { ph = 3; heat[i] = 0.7; arrived[i] = 0; settle[i] = 0.24; }
+            vx = (vx + ax * dt) * aboutHoldDamp; vy = (vy + ay * dt) * aboutHoldDamp;
           } else {
             // energía cinética acumulada durante la compresión reversible al subir hacia ALYSAURIO
             if (charge > 0.002) {
@@ -1662,6 +1884,17 @@ export class ParticleSystem {
           }
         } else if (sd >= 1e8) {
           vx *= rest; vy *= rest;
+        } else if (aboutOn) {
+          // retorno rápido y sobreamortiguado hacia el eje vertical de la llama de vela (cero rebote elástico)
+          ax += rx * C.spacing * 0.28; ay += ry * C.spacing * 0.28 + 85;
+          const an = -aboutRetK * Math.min(sd, 480);
+          vx += (ax + gx * an) * dt; vy += (ay + gy * an) * dt;
+          let vn = vx * gx + vy * gy;
+          const ttx = vx - vn * gx, tty = vy - vn * gy;
+          vn *= Math.exp(-aboutRetC * dt);
+          const lk = Math.exp(-9.5 * dt);
+          vx = ttx * lk + vn * gx; vy = tty * lk + vn * gy;
+          if (sd < 4.5) { ph = 0; arrived[i] = 1; }
         } else if (isDetail || (S.mode === 0 && this.heroNoBounce)) {
           // FASE 2 sobreamortiguada: DETAIL_RECT y restauración de agujero negro (encaja en seco sin elasticidad ni rebotes)
           ax += rx * C.spacing * 0.25; ay += ry * C.spacing * 0.25;
@@ -1735,7 +1968,13 @@ export class ParticleSystem {
         }
       }
 
-      // contención estricta en el viewport (clamping duro)
+      // contención estricta en el viewport (y límite horizontal seguro de ABOUT_DIVIDER contra invasión de textos)
+      if (aboutOn) {
+        if (x < -aboutMaxX) { x = -aboutMaxX; vx = Math.abs(vx) * 0.2; }
+        else if (x > aboutMaxX) { x = aboutMaxX; vx = -Math.abs(vx) * 0.2; }
+        if (y < aboutYMin) { y = aboutYMin; vy = Math.abs(vy) * 0.3; }
+        else if (y > aboutYMax) { y = aboutYMax; vy = -Math.abs(vy) * 0.2; }
+      }
       if (x < -hW + 1) { x = -hW + 1; vx = Math.abs(vx) * 0.4; } else if (x > hW - 1) { x = hW - 1; vx = -Math.abs(vx) * 0.4; }
       if (y < -hH + 1) { y = -hH + 1; vy = Math.abs(vy) * 0.4; } else if (y > hH - 1) { y = hH - 1; vy = -Math.abs(vy) * 0.4; }
       px[i] = x; py[i] = y; vxA[i] = vx; vyA[i] = vy; phase[i] = ph;
@@ -1823,7 +2062,9 @@ export class ParticleSystem {
     const boxOn = S.boxOn && S.boxD > 0.001;
     const bandW = Math.max(1, 2 * S.brb);
     const heroSm = this.heroModeSm;
-    const bhFireMul = this.bh.active ? 0.30 : (this.bh.releasing ? (0.30 + 1.05 * Math.min(1, this.bh.relTime / 0.85)) : 1.35);
+    const aboutSplat = S.mode === 1 && !S.ringActive && !S.isDetail && S.L > 2;
+    const bhFireMul = this.bh.active ? 0.30 : (this.bh.releasing ? (0.30 + 1.05 * Math.min(1, this.bh.relTime / 0.85)) : (aboutSplat ? 0.44 : 1.35));
+    const spTime = t * 3.1;
 
     for (let gi = 0; gi < size; gi++) {
       const m = Dm[gi], o = gi * 4;
@@ -1857,6 +2098,15 @@ export class ParticleSystem {
         flash = Math.min(1, ch * ch * (0.42 + 0.88 * hot * hot) + (ch > 0.72 ? (ch - 0.72) * 1.4 : 0));
         E = Math.min(1, E + flash * 0.85);
       }
+      if (aboutSplat) {
+        // ahusamiento suave de densidad en los últimos ~35 px de ambos extremos (punta de llama + despeje sobre SCROLL ↑)
+        const wy = hH - (((gi / gw) | 0) + 0.5) * cs - S.lineY;
+        const dTop = S.L - wy, dBot = S.L + wy;
+        let taper = 1;
+        if (dTop < 40) { let u = dTop / 40; u = u < 0 ? 0 : u > 1 ? 1 : u; taper *= 0.25 + 0.75 * u * u * (3 - 2 * u); }
+        if (dBot < 36) { let u = dBot / 36; u = u < 0 ? 0 : u > 1 ? 1 : u; taper *= 0.22 + 0.78 * u * u * (3 - 2 * u); }
+        L *= taper;
+      }
       L *= 1 + 0.5 * E;
       let f = (L - 0.05) / 1.5; f = f < 0 ? 0 : f > 1 ? 1 : f;
       let gl = Math.pow(f, 0.85) * 8.99 + E * 1.5 + (ch > 0.005 ? ch * (1.6 + 2.6 * hs) : 0);
@@ -1867,12 +2117,38 @@ export class ParticleSystem {
       let gg = Dg[gi] * inv + (1 - Dg[gi] * inv) * white;
       let bb = Db[gi] * inv + (1 - Db[gi] * inv) * white;
       if (heroSm > 0.005) {
-        // refuerza contraste núcleo blanco (# % @) vs bordes prismáticos (. : ; = + x) en HERO_TEXT en reposo
-        let gt = (gl - 4.6) / 2.4; gt = gt < 0 ? 0 : gt > 1 ? 1 : gt; gt = gt * gt * (3 - 2 * gt);
-        const coreLift = gt * 0.24 * heroSm;
+        // núcleo denso (# % @) blanco limpio + micro-chispas pseudoaleatorias asincrónicas por celda en bordes/zonas medias
+        let gt = (gl - 4.7) / 2.2; gt = gt < 0 ? 0 : gt > 1 ? 1 : gt; gt = gt * gt * (3 - 2 * gt);
+        const coreLift = gt * 0.44 * heroSm;
         rr += (0.949 - rr) * coreLift;
         gg += (0.957 - gg) * coreLift;
         bb += (0.973 - bb) * coreLift;
+        if (gt < 0.88) {
+          const phCell = spTime + ihash(gi, 137) * 8.0;
+          const tk = phCell | 0, fr = phCell - tk;
+          const v0 = ihash(gi, tk * 19 + 7), v1 = ihash(gi, (tk + 1) * 19 + 7);
+          const sv = v0 + (v1 - v0) * (fr * fr * (3 - 2 * fr));
+          if (sv > 0.72) {
+            const pk = HERO_PAL[(ihash(gi, tk * 31 + 3) * 4) | 0];
+            const sm = ((sv - 0.72) / 0.28) * (1 - gt * 0.82) * 0.72 * heroSm;
+            rr += (pk[0] - rr) * sm; gg += (pk[1] - gg) * sm; bb += (pk[2] - bb) * sm;
+          }
+        }
+      } else if (aboutSplat) {
+        // micro-centelleo caótico cálido/frío por celda en la envoltura de la llama (núcleo # % @ más blanco incandescente)
+        let gt = (gl - 5.4) / 2.4; gt = gt < 0 ? 0 : gt > 1 ? 1 : gt; gt = gt * gt * (3 - 2 * gt);
+        const coreW = gt * (0.34 - Math.min(0.24, E * 0.45));
+        rr += (0.961 - rr) * coreW; gg += (0.969 - gg) * coreW; bb += (0.980 - bb) * coreW;
+        if (gt < 0.82) {
+          const phC = t * 4.4 + ihash(gi, 211) * 9.0;
+          const tk = phC | 0, fr = phC - tk;
+          const sv = ihash(gi, tk * 23 + 11) * (1 - fr) + ihash(gi, (tk + 1) * 23 + 11) * fr;
+          if (sv > 0.74) {
+            const pick = ihash(gi, tk * 17 + 5) < 0.52 ? CANDLE_WARM[(ihash(gi, tk * 13 + 2) * 3) | 0] : CANDLE_COOL[(ihash(gi, tk * 13 + 2) * 3) | 0];
+            const sm = ((sv - 0.74) / 0.26) * (0.32 + 0.52 * Math.min(1, E * 1.4)) * (1 - gt * 0.65);
+            rr += (pick[0] - rr) * sm; gg += (pick[1] - gg) * sm; bb += (pick[2] - bb) * sm;
+          }
+        }
       }
       out[o] = rr; out[o + 1] = gg; out[o + 2] = bb;
       out[o + 3] = Math.floor(gl) + al * 0.99;

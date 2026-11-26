@@ -18,8 +18,8 @@ const TINT_MAX = 0.07, TINT_RATE = 3.7;
 const PREVIEW_R_BASE = 0.42;
 const PREVIEW_R_MAX = PREVIEW_R_BASE * 1.30; // +30 % en diámetro máximo en el punto medio del segmento
 const MIN_VIDEO_PX = 4;                      // por debajo de 4 px deja de renderizarse el vídeo del arito
-const RING_RB = 17;                          // grosor +30 % del aro principal
-const PREVIEW_RB = 9.1;                      // grosor +30 % del contorno del «arito»
+const RING_RB = 19.4;                        // grosor +14 % sobre el aro principal anterior
+const PREVIEW_RB = 10.4;                     // grosor +14 % sobre el contorno del «arito» (proporcionalmente más fino)
 const DETAIL_RB = 18, DETAIL_OFF = 18;
 const BG_RING_LEVEL = 0.40;
 const MAG_RADIUS = 135;
@@ -750,10 +750,16 @@ function start(projects, canvas, gl2, FONT) {
 
     const curInsideRect = state === STATE.DETAIL_RECT && detailP > 0.85 && cur.valid && cursorInsideBox();
 
+    // límites verticales limpios de la columna ABOUT_DIVIDER (~9 % superior, ≥82 px sobre el borde inferior para librar SCROLL ↑)
+    const aboutTop = H * 0.5 - Math.max(44, H * 0.09);
+    const aboutBot = -H * 0.5 + Math.max(82, H * 0.095);
+    const aboutL = state === STATE.ABOUT_DIVIDER ? Math.max(80, (aboutTop - aboutBot) * 0.5) : 0;
+    const aboutY = (aboutTop + aboutBot) * 0.5;
+
     ps.setTargets({
       mode: state === STATE.HERO_TEXT ? 0 : 1,
       R, rb: RING_RB, arcs, colors: colorsRef, box, junction: jn,
-      lineL: state === STATE.ABOUT_DIVIDER ? H * 0.46 : 0, lrb: 13,
+      lineL: aboutL, lineY: aboutY, lrb: 13,
       enabled: RING_STATES.has(state),
       pusher,
       ringActive: RING_STATES.has(state),
