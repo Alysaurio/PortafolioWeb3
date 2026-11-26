@@ -1,7 +1,10 @@
-// videoManager.js — carga de .mp4, respaldo procedural en <canvas> y extracción de paleta dominante (8×8 @ ~7 Hz).
+// videoManager.js — carga de .mp4, respaldo procedural, extracción única de color ADN con repulsión equilibrada
+// en la rueda cromática (escalable a N proyectos) y muestreo local en vivo 24×14 para DETAIL_RECT.
 import * as THREE from 'three';
 
 const SAMPLE_INTERVAL = 1 / 7;
+const DNA_ACCUM_S = 1.25;            // ventana inicial para extraer y bloquear el color ADN del vídeo
+const MAX_DNA_SHIFT_DEG = 46;        // desplazamiento máximo permitido respecto al matiz ADN original (±46°)
 const FB_W = 512, FB_H = 288;
 const LOCAL_W = 24, LOCAL_H = 14;
 
@@ -36,23 +39,24 @@ function hslToRgb([h, s, l]) {
   const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
   return [f(p, q, h + 1 / 3), f(p, q, h), f(p, q, h - 1 / 3)];
 }
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const hslCss = (h, s, l, a = 1) => `hsla(${Math.round(((h % 1) + 1) % 1 * 360)},${Math.round(s * 100)}%,${Math.round(l * 100)}%,${a})`;
 
-/** Color apto para partículas/tinte según ringColorMode ('vibrantAccent' | 'dominant' | 'complementary'). */
-function toDisplay(rgb, mode = 'vibrantAccent') {
-  const [h, s, l] = rgbToHsl(rgb);
+/** Diferencia angular firmada más corta (a - b) en (-180°, 180°]. */
+function shortAngDiffDeg(a, b) {
+  let d = (a - b) % 360;
+  if (d <= -180) d += 360;
+  else if (d > 180) d -= 360;
+  return d;
+}
+
+/** Calibración armónica sobria para los segmentos del aro sobre #121315 (S en [48 %, 74 %], L en [50 %, 62 %]). */
+function calibrateResolved(hDeg, s, l, mode = 'vibrantAccent') {
+  const h = (((hDeg % 360) + 360) % 360) / 360;
   if (mode === 'complementary') {
-    const compH = (h + 0.5) % 1;
-    const compS = Math.min(0.78, Math.max(s + 0.12, 0.42));
-    return hslToRgb([compH, compS, Math.min(0.72, Math.max(l, 0.52))]);
+    return hslToRgb([(h + 0.5) % 1, clamp(s + 0.12, 0.48, 0.78), clamp(l, 0.50, 0.62)]);
   }
-  if (mode === 'dominant') {
-    return hslToRgb([h, Math.min(Math.max(s, 0.35), 0.78), Math.min(Math.max(l, 0.5), 0.72)]);
-  }
-  // 'vibrantAccent': realce controlado de saturación (+18 %) y piso de luminosidad sobre #121315
-  const vibS = Math.min(0.88, Math.max(s * 1.18 + 0.05, 0.46));
-  const vibL = Math.min(0.74, Math.max(l, 0.54));
-  return hslToRgb([h, vibS, vibL]);
+  return hslToRgb([h, clamp(s, 0.48, 0.74), clamp(l, 0.50, 0.62)]);
 }
 
 /* ---------- vídeo procedural de respaldo ---------- */
@@ -75,7 +79,7 @@ function makeFallback(index, baseRgb) {
     const g = ctx.createLinearGradient(0, 0, w, hh);
     g.addColorStop(0, pal.bg0); g.addColorStop(1, pal.bg1);
     ctx.fillStyle = g; ctx.fillRect(0, 0, w, hh);
-    if (program === 0) {            // círculos flotantes + anillos concéntricos
+    if (program === 0) {
       for (let r = 0; r < 5; r++) {
         ctx.strokeStyle = pal.d(0.35 - r * 0.05); ctx.lineWidth = 3;
         ctx.beginPath(); ctx.arc(w * 0.5, hh * 0.5, 30 + r * 34 + 10 * Math.sin(t * 1.3 + r), 0, 7); ctx.stroke();
@@ -85,7 +89,7 @@ function makeFallback(index, baseRgb) {
         ctx.fillStyle = [pal.a, pal.b, pal.c][j % 3](0.9);
         ctx.beginPath(); ctx.arc(x, y, 14 + 12 * Math.abs(Math.sin(t * 0.9 + j)), 0, 7); ctx.fill();
       }
-    } else if (program === 1) {     // cuadrícula de cuadrados rotando + franjas diagonales
+    } else if (program === 1) {
       ctx.save(); ctx.translate(w / 2, hh / 2); ctx.rotate(0.5);
       for (let k = -8; k < 8; k++) {
         ctx.fillStyle = k % 2 ? pal.c(0.35) : pal.a(0.25);
@@ -98,7 +102,7 @@ function makeFallback(index, baseRgb) {
         ctx.fillStyle = ((i + j) % 2 ? pal.b : pal.a)(0.85); ctx.fillRect(-sz / 2, -sz / 2, sz, sz);
         ctx.restore();
       }
-    } else {                        // barras deslizantes + ondas + cuadrados orbitando
+    } else {
       for (let i = 0; i < 9; i++) {
         const y = (i / 9) * hh, ww = w * (0.25 + 0.5 * Math.abs(Math.sin(t * 0.6 + i)));
         ctx.fillStyle = [pal.a, pal.c, pal.b][i % 3](0.55);
@@ -132,22 +136,30 @@ export class VideoManager {
     this.lastSample = 0;
     this.lastFb = 0;
     this.items = projects.map((p, i) => this._createItem(p, i));
+    // resuelve la separación inicial desde los fallbackColor desde el primer fotograma
+    this._solveColorWheel(true);
   }
 
   _createItem(project, index) {
     const base = hexToRgb(project.fallbackColor);
     const [h, s, l] = rgbToHsl(base);
     const fb = makeFallback(index, base);
-    const derived = [base, hslToRgb([h + 0.08, s, l]), hslToRgb([h - 0.1, s, l])];
+    const initDisp = calibrateResolved(h * 360, s, l, this.colorMode);
     const item = {
       project, index, fb, base,
-      texture: fb.texture, canvas: fb.canvas, video: null, usingVideo: false,
-      targets: derived.map(c => c.slice()), colors: derived.map(c => c.slice()),
-      display: toDisplay(base),
+      texture: fb.texture, canvas: fb.canvas, video: null, usingVideo: false, videoError: false,
+      // color ADN único por proyecto (se extrae brevemente al cargar el vídeo y queda bloqueado)
+      dnaH: h * 360, dnaS: s, dnaL: l,
+      dnaLocked: false, dnaElapsed: 0, dnaFrames: 0, dnaBuckets: new Map(),
+      targetDisplay: initDisp.slice(),
+      display: initDisp.slice(),
       localT: new Float32Array(LOCAL_W * LOCAL_H * 3), localS: new Float32Array(LOCAL_W * LOCAL_H * 3),
     };
-    const d0 = item.display;
-    for (let p = 0; p < LOCAL_W * LOCAL_H; p++) { item.localT[p * 3] = item.localS[p * 3] = d0[0]; item.localT[p * 3 + 1] = item.localS[p * 3 + 1] = d0[1]; item.localT[p * 3 + 2] = item.localS[p * 3 + 2] = d0[2]; }
+    for (let p = 0; p < LOCAL_W * LOCAL_H; p++) {
+      item.localT[p * 3] = item.localS[p * 3] = initDisp[0];
+      item.localT[p * 3 + 1] = item.localS[p * 3 + 1] = initDisp[1];
+      item.localT[p * 3 + 2] = item.localS[p * 3 + 2] = initDisp[2];
+    }
     if (project.video) {
       const v = document.createElement('video');
       v.muted = true; v.loop = true; v.playsInline = true; v.preload = 'auto';
@@ -158,28 +170,119 @@ export class VideoManager {
         tex.minFilter = THREE.LinearFilter; tex.generateMipmaps = false;
         item.vtex = tex; item.video = v;
         item.texture = tex; item.usingVideo = true;
-        v.play().catch(() => { /* autoplay bloqueado: seguirá el respaldo hasta interacción */ item.usingVideo = false; item.texture = fb.texture; });
+        v.play().catch(() => { item.usingVideo = false; item.texture = fb.texture; });
       });
-      v.addEventListener('error', () => console.info(`[videoManager] ${project.video} no disponible → vídeo procedural de respaldo.`));
+      v.addEventListener('error', () => {
+        item.videoError = true;
+        item.dnaLocked = true;
+        console.info(`[videoManager] ${project.video} no disponible → vídeo procedural de respaldo.`);
+      });
       v.src = project.video;
       v.load();
-      // si el navegador bloquea el autoplay, reintentar con el primer gesto
-      const kick = () => { if (item.video && item.video.paused) item.video.play().then(() => { item.usingVideo = true; item.texture = item.vtex; }).catch(() => {}); };
+      const kick = () => {
+        if (item.video && item.video.paused) {
+          item.video.play().then(() => { item.usingVideo = true; item.texture = item.vtex; }).catch(() => {});
+        }
+      };
       window.addEventListener('pointerdown', kick, { once: true });
       window.addEventListener('wheel', kick, { once: true, passive: true });
+    } else {
+      item.dnaLocked = true;
     }
     return item;
+  }
+
+  /** Solver iterativo de repulsión equilibrada sobre la rueda cromática (escalable a cualquier N proyectos). */
+  _solveColorWheel(snap = false) {
+    const items = this.items, N = items.length;
+    if (N === 0) return;
+    const minSepDeg = Math.min(78, 260 / Math.max(2, N));
+    const H0 = items.map(it => it.dnaH);
+    const H = H0.slice();
+    const force = new Float32Array(N);
+
+    for (let iter = 0; iter < 40; iter++) {
+      force.fill(0);
+      for (let i = 0; i < N; i++) {
+        for (let j = i + 1; j < N; j++) {
+          const diff = shortAngDiffDeg(H[i], H[j]);
+          const absD = Math.abs(diff);
+          if (absD < minSepDeg) {
+            const dir = absD < 0.01 ? (i < j ? -1 : 1) : (diff >= 0 ? 1 : -1);
+            const push = (minSepDeg - absD) * 0.22;
+            force[i] += dir * push;
+            force[j] -= dir * push;
+          }
+        }
+        // anclaje elástico suave hacia el ADN original para conservar identidad cromática
+        force[i] += shortAngDiffDeg(H0[i], H[i]) * 0.09;
+      }
+      for (let i = 0; i < N; i++) {
+        const shifted = clamp(shortAngDiffDeg(H[i] + force[i], H0[i]), -MAX_DNA_SHIFT_DEG, MAX_DNA_SHIFT_DEG);
+        H[i] = ((H0[i] + shifted) % 360 + 360) % 360;
+      }
+    }
+
+    for (let i = 0; i < N; i++) {
+      const it = items[i];
+      const resolved = calibrateResolved(H[i], it.dnaS, it.dnaL, this.colorMode);
+      it.targetDisplay = resolved;
+      if (snap) it.display = resolved.slice();
+    }
+  }
+
+  /** Acumula muestras ponderadas por croma/saturación durante ~1.25 s iniciales y bloquea el ADN permanentemente. */
+  _accumDna(item) {
+    if (item.dnaLocked || !item.usingVideo || !item.video || item.video.readyState < 2) return false;
+    let data;
+    try {
+      this.sCtx.drawImage(item.video, 0, 0, 8, 8);
+      data = this.sCtx.getImageData(0, 0, 8, 8).data;
+    } catch (e) { return false; }
+
+    let maxLum = 0;
+    const buckets = item.dnaBuckets;
+    for (let p = 0; p < 64; p++) {
+      const r = data[p * 4], g = data[p * 4 + 1], b = data[p * 4 + 2];
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      if (mx > maxLum) maxLum = mx;
+      if (mx < 28) continue;
+      const sat = (mx - mn) / (mx || 1);
+      const chroma = (mx - mn) / 255;
+      const lum = (mx + mn) / 510;
+      const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
+      let bk = buckets.get(key);
+      if (!bk) { bk = { r: 0, g: 0, b: 0, n: 0, score: 0 }; buckets.set(key, bk); }
+      const lumW = Math.max(0.15, 1 - Math.abs(lum - 0.52) * 1.15);
+      bk.r += r; bk.g += g; bk.b += b; bk.n++;
+      bk.score += (0.14 + Math.pow(sat, 2.2) * 5.8 + chroma * 4.6) * lumW;
+    }
+    if (maxLum >= 32) item.dnaFrames++;
+
+    if (item.dnaElapsed >= DNA_ACCUM_S && (item.dnaFrames >= 3 || item.dnaElapsed >= 2.5)) {
+      let best = null;
+      for (const bk of buckets.values()) if (!best || bk.score > best.score) best = bk;
+      if (best && best.n > 0) {
+        const rgb = [best.r / best.n / 255, best.g / best.n / 255, best.b / best.n / 255];
+        const [h, s, l] = rgbToHsl(rgb);
+        item.dnaH = h * 360;
+        item.dnaS = clamp(s * 1.18 + 0.04, 0.48, 0.74);
+        item.dnaL = clamp(l, 0.50, 0.62);
+      }
+      item.dnaLocked = true;
+      item.dnaBuckets.clear();
+      return true;
+    }
+    return false;
   }
 
   getTexture(i) { return this.items[i].texture; }
   getSource(i) { const it = this.items[i]; return it.usingVideo ? it.video : it.canvas; }
   getColor(i) { return this.items[i].display; }
+  getLocal(i) { return this.items[i].localS; }
   restart(i) { const it = this.items[i]; if (it && it.usingVideo) { try { it.video.currentTime = 0; } catch (e) { /* noop */ } } }
 
-  /** @param needed Set de índices cuyo frame se usa ahora mismo (para limitar subidas de textura) */
-  /** Rejilla 24×14 de color local del vídeo (suavizada) para colorear el marco perimetral del rectángulo. */
-  getLocal(i) { return this.items[i].localS; }
-
+  /** Muestreo en vivo 24×14 de los bordes del vídeo para DETAIL_RECT (intacto). */
   _sampleLocal(item) {
     const src = item.usingVideo ? item.video : item.canvas;
     let data;
@@ -195,8 +298,10 @@ export class VideoManager {
   }
 
   update(t, dt, needed, localId = -1, colorMode = 'vibrantAccent') {
-    const modeChanged = colorMode !== this.colorMode;
-    this.colorMode = colorMode;
+    if (colorMode !== this.colorMode) {
+      this.colorMode = colorMode;
+      this._solveColorWheel(false);
+    }
     if (localId >= 0 && t - this.lastLocal > 0.11) { this.lastLocal = t; this._sampleLocal(this.items[localId]); }
     if (localId >= 0) {
       const it = this.items[localId], k = 1 - Math.exp(-dt * 8);
@@ -207,66 +312,28 @@ export class VideoManager {
       this.lastFb = t;
       for (const it of this.items) if (!it.usingVideo && needed.has(it.index)) { it.fb.draw(t); it.fb.texture.needsUpdate = true; }
     }
-    // extracción de paleta a ~7 Hz (o inmediata si cambió el modo cromático)
-    if (modeChanged || t - this.lastSample > SAMPLE_INTERVAL) {
-      this.lastSample = t;
-      for (const it of this.items) {
-        if (!it.usingVideo) it.fb.draw(t);
-        this._sample(it);
-      }
-    }
-    // lerp continuo hacia la paleta objetivo
-    const k = 1 - Math.exp(-dt * 4);
+    // acumulación única del color ADN mientras los vídeos aún no estén bloqueados
+    let anyUnlocked = false;
     for (const it of this.items) {
-      for (let c = 0; c < 3; c++) for (let j = 0; j < 3; j++) it.colors[c][j] += (it.targets[c][j] - it.colors[c][j]) * k;
-      it.display = toDisplay(it.colors[0], this.colorMode);
-    }
-  }
-
-  _sample(item) {
-    const src = item.usingVideo ? item.video : item.canvas;
-    let data;
-    try {
-      this.sCtx.drawImage(src, 0, 0, 8, 8);
-      data = this.sCtx.getImageData(0, 0, 8, 8).data;
-    } catch (e) { data = null; }
-    const [h, s, l] = rgbToHsl(item.base);
-    const fallback = [item.base, hslToRgb([h + 0.08, s, l]), hslToRgb([h - 0.1, s, l])];
-    if (!data) { item.targets = fallback; return; }
-
-    const vibrant = this.colorMode === 'vibrantAccent';
-    const buckets = new Map();
-    let maxLum = 0;
-    for (let p = 0; p < 64; p++) {
-      const r = data[p * 4], g = data[p * 4 + 1], b = data[p * 4 + 2];
-      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-      maxLum = Math.max(maxLum, mx);
-      if (mx < 24) continue;
-      const sat = (mx - mn) / (mx || 1);
-      const chroma = (mx - mn) / 255;
-      const lum = (mx + mn) / 510;
-      const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
-      let bk = buckets.get(key);
-      if (!bk) { bk = { r: 0, g: 0, b: 0, n: 0, score: 0 }; buckets.set(key, bk); }
-      bk.r += r; bk.g += g; bk.b += b; bk.n++;
-      if (vibrant) {
-        // pondera fuertemente por croma/saturación y luminancia media para extraer un acento expresivo por proyecto
-        const lumW = Math.max(0.15, 1 - Math.abs(lum - 0.52) * 1.15);
-        bk.score += (0.14 + Math.pow(sat, 2.2) * 5.8 + chroma * 4.6) * lumW;
-      } else {
-        bk.score += 1 + sat * 1.6;
+      if (!it.dnaLocked) {
+        anyUnlocked = true;
+        if (it.usingVideo) it.dnaElapsed += dt;
       }
     }
-    if (maxLum < 32 || buckets.size === 0) { item.targets = fallback; return; }   // fotograma negro → color de respaldo
-
-    const sorted = [...buckets.values()].sort((a, b) => b.score - a.score);
-    const picked = [];
-    for (const bk of sorted) {
-      const c = [bk.r / bk.n / 255, bk.g / bk.n / 255, bk.b / bk.n / 255];
-      if (picked.every(q => Math.hypot(q[0] - c[0], q[1] - c[1], q[2] - c[2]) > 0.22)) picked.push(c);
-      if (picked.length === 3) break;
+    if (anyUnlocked && t - this.lastSample > SAMPLE_INTERVAL) {
+      this.lastSample = t;
+      let lockedNow = false;
+      for (const it of this.items) if (this._accumDna(it)) lockedNow = true;
+      if (lockedNow) this._solveColorWheel(false);
     }
-    while (picked.length < 3) picked.push(fallback[picked.length]);
-    item.targets = picked;
+    // transición suave (~400 ms) solo cuando el solver recalcula al terminar la carga inicial; luego totalmente fijo
+    const k = 1 - Math.exp(-dt * 7.5);
+    for (const it of this.items) {
+      for (let j = 0; j < 3; j++) {
+        const diff = it.targetDisplay[j] - it.display[j];
+        if (Math.abs(diff) > 1e-4) it.display[j] += diff * k;
+        else it.display[j] = it.targetDisplay[j];
+      }
+    }
   }
 }

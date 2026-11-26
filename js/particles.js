@@ -14,9 +14,11 @@ export const PHYSICS_CONFIG = {
   pushForce: 0.52,                   // impulso recalibrado en estado base (controlado y elegante)
   maxDispersionSpeed: 460,           // px/s, tope de velocidad en dispersión de humo (420–480 px/s)
   previewPushMultiplier: 0.40,       // multiplicador relativo con «arito» activo (efectivo ~0.21)
-  previewHoverDelayMs: 520,          // ms de quietud sobre un segmento antes de abrir el «arito» (editable hasta 1000)
-  previewDwellMaxCursorSpeed: 190,   // px/s, velocidad máxima para cargar el retardo de apertura
-  ringColorMode: 'vibrantAccent',    // calibración cromática del aro: 'vibrantAccent' | 'dominant' | 'complementary'
+  dwellBaseDurationMs: 350,          // ms para conquistar y abrir el «arito» con el cursor estático
+  dwellMovingSlowdown: 2.8,          // ralentización mientras el cursor se mueve jugando con el humo (~0.98 s)
+  dwellSpeedRefPxPerSec: 260,        // px/s, velocidad de referencia para interpolar quieto ↔ en movimiento
+  dwellRetractDurationMs: 280,       // ms de retroceso suave del contador y líneas al salir del segmento
+  ringColorMode: 'vibrantAccent',    // calibración cromática del aro: 'vibrantAccent' | 'complementary'
   magneticBrake: 0.20,               // 20 % — leve rebote elástico en el Aro y Hero
   cursorRadius: 85,                  // px, radio base restaurado (sin «arito» activo)
   xsphCohesion: 0.30,                // arrastre de vecinas (XSPH)
@@ -216,11 +218,19 @@ function sdfScene(S, x, y) {
 let oR = 1, oG = 1, oB = 1;
 function arcColor(S, x, y) {
   const N = S.N, col = S.colors;
-  const { k, f } = segmentAt(Math.atan2(y, x), N);
+  const ang = Math.atan2(y, x);
+  if (S.conqSeg >= 0 && S.conqP > 0.001) {
+    const halfSpan = Math.PI / N;
+    const conqHalf = halfSpan + S.conqP * (Math.PI - halfSpan);
+    if (Math.abs(wrapAngle(ang - centerAngle(S.conqSeg, N))) <= conqHalf) {
+      const cc = col[S.conqSeg % N];
+      oR = cc[0]; oG = cc[1]; oB = cc[2];
+      return;
+    }
+  }
+  const { k } = segmentAt(ang, N);
   const c = col[k % N];
-  if (f < 0.14) { const t = 0.5 + f / 0.28, p = col[(k + N - 1) % N]; oR = p[0] + (c[0] - p[0]) * t; oG = p[1] + (c[1] - p[1]) * t; oB = p[2] + (c[2] - p[2]) * t; }
-  else if (f > 0.86) { const t = (f - 0.86) / 0.28, q = col[(k + 1) % N]; oR = c[0] + (q[0] - c[0]) * t; oG = c[1] + (q[1] - c[1]) * t; oB = c[2] + (q[2] - c[2]) * t; }
-  else { oR = c[0]; oG = c[1]; oB = c[2]; }
+  oR = c[0]; oG = c[1]; oB = c[2];
 }
 
 function propagate(mask, gw, gh) {
@@ -343,7 +353,7 @@ export class ParticleSystem {
       pusher: null,
       jx: 0, jy: 0, jr: 0, jtx: 0, jty: 0, jtr: 0,
       L: 0, LT: 0, lrb: 13, ropeH: 400, ro: null,
-      ringActive: false, charge: 0, dwellP: 0, dwellAng: 0,
+      ringActive: false, charge: 0, conqSeg: -1, conqP: 0,
     };
   }
 
@@ -625,7 +635,8 @@ export class ParticleSystem {
     S.mode = t.mode; S.R = t.R; S.rb = t.rb;
     S.ringActive = !!t.ringActive;
     S.charge = t.charge || 0;
-    S.dwellP = t.dwellP || 0; S.dwellAng = t.dwellAng || 0;
+    S.conqSeg = t.conqSeg !== undefined ? t.conqSeg : -1;
+    S.conqP = t.conqP || 0;
     S.isDetail = !!t.isDetail;
     S.curInsideRect = !!t.curInsideRect;
     S.curWasInsideRect = !!t.curWasInsideRect;
@@ -1623,11 +1634,20 @@ export class ParticleSystem {
 
     const out = this.gridData, size = gw * gh;
     const ch = S.ringActive && !S.isDetail ? S.charge : 0;
-    const dwP = S.ringActive && !S.isDetail ? S.dwellP : 0;
-    const dwAng = S.dwellAng, dwSpread = 0.14 + 0.22 * dwP, dwWave = 0.28 + 0.18 * Math.sin(t * 10.0);
     const flick = (t * (7 + 48 * ch * ch)) | 0;
     const boxOn = S.boxOn && S.boxD > 0.001;
     const bandW = Math.max(1, 2 * S.brb);
+    // líneas divisorias sutiles tono-fondo (#121315) y fronteras de conquista sincronizadas con dwellProgress
+    const divOn = S.ringActive && !S.isDetail && S.boxD < 0.05 && S.N >= 2;
+    const conqSeg = S.conqSeg, conqP = S.conqP;
+    const segRad = TWO_PI / S.N, halfSpan = Math.PI / S.N;
+    const conqHalf = halfSpan + conqP * (Math.PI - halfSpan);
+    const conqMid = conqSeg >= 0 ? centerAngle(conqSeg, S.N) : 0;
+    const advFade = conqP <= 0.92 ? 1 : Math.max(0, 1 - (conqP - 0.92) / 0.08);
+    const divHalf = 1.8 * Math.PI / 180, divFeather = 1.0 * Math.PI / 180;
+    const aritoKeepR = S.boxOn && S.vidR > 2 ? (S.vidR + S.brb * 1.15) : 0;
+    const bgR = 0x12 / 255, bgG = 0x13 / 255, bgB = 0x15 / 255;
+
     for (let gi = 0; gi < size; gi++) {
       const m = Dm[gi], o = gi * 4;
       if (m < 0.004) { out[o + 3] = 0; continue; }
@@ -1649,20 +1669,45 @@ export class ParticleSystem {
         L *= 1 + (p - 1) * S.boxD;
         E = Math.min(1, E + (wCol * 0.42 + wSum * 0.06) * S.boxD);
       }
-      let flash = 0;
-      if (dwP > 0.02) {
-        // micro-feedback sutil de carga de quietud localizado en el tramo bajo el cursor
+      let divMask = 0;
+      if (divOn) {
         const wx = ((gi % gw) + 0.5) * cs - hW, wy = hH - (((gi / gw) | 0) + 0.5) * cs;
         const rr = Math.hypot(wx, wy);
-        if (Math.abs(rr - S.R) < S.rb * 1.65) {
-          const da = wrapAngle(Math.atan2(wy, wx) - dwAng);
-          if (Math.abs(da) < 0.55) {
-            const dp = dwP * Math.exp(-(da * da) / dwSpread) * dwWave;
-            L *= 1 + dp * 0.55;
-            E = Math.min(1, E + dp * 0.42);
+        if (Math.abs(rr - S.R) < S.rb * 1.45 && (aritoKeepR <= 0 || Math.hypot(wx - S.bx, wy - S.by) > aritoKeepR)) {
+          const ang = Math.atan2(wy, wx);
+          if (conqSeg >= 0 && conqP > 0.001) {
+            const ad = Math.abs(wrapAngle(ang - conqMid));
+            let mAdv = 0;
+            if (advFade > 0.005) {
+              const dAdv = Math.abs(ad - conqHalf);
+              if (dAdv < divHalf + divFeather) {
+                let u = (dAdv - divHalf) / divFeather; u = u < 0 ? 0 : u > 1 ? 1 : u;
+                mAdv = (1 - u * u * (3 - 2 * u)) * advFade;
+              }
+            }
+            let mRest = 0;
+            if (ad > conqHalf && conqP < 0.995) {
+              const { f } = segmentAt(ang, S.N);
+              const dRest = Math.min(f, 1 - f) * segRad;
+              if (dRest < divHalf + divFeather) {
+                let u = (dRest - divHalf) / divFeather; u = u < 0 ? 0 : u > 1 ? 1 : u;
+                mRest = 1 - u * u * (3 - 2 * u);
+              }
+            }
+            divMask = mAdv > mRest ? mAdv : mRest;
+          } else {
+            const { f } = segmentAt(ang, S.N);
+            const dRest = Math.min(f, 1 - f) * segRad;
+            if (dRest < divHalf + divFeather) {
+              let u = (dRest - divHalf) / divFeather; u = u < 0 ? 0 : u > 1 ? 1 : u;
+              divMask = 1 - u * u * (3 - 2 * u);
+            }
           }
+          // evita cortes en medio del chisporroteo incandescente de pre-explosión
+          if (ch > 0.2) divMask *= Math.max(0, 1 - (ch - 0.2) * 1.6);
         }
       }
+      let flash = 0;
       if (ch > 0.005) {
         // mutación frenética de glifos hacia x # % @ + calentamiento incandescente pulsante irregular
         const wx = ((gi % gw) + 0.5) * cs - hW, wy = hH - (((gi / gw) | 0) + 0.5) * cs;
@@ -1674,14 +1719,22 @@ export class ParticleSystem {
         E = Math.min(1, E + flash * 0.85);
       }
       L *= 1 + 0.5 * E;
+      if (divMask > 0.005) L *= 1 - 0.35 * divMask;
       let f = (L - 0.05) / 1.5; f = f < 0 ? 0 : f > 1 ? 1 : f;
       let gl = Math.pow(f, 0.85) * 8.99 + E * 1.5 + (ch > 0.005 ? ch * (1.6 + 2.6 * hs) : 0);
       if (gl > 8.99) gl = 8.99;
       let al = (L - 0.03) / 0.19; al = al < 0 ? 0 : al > 1 ? 1 : al; al = al * al * (3 - 2 * al);
-      const white = Math.min(1, Math.max(E * 1.35, flash));
-      out[o] = Dr[gi] * inv + (1 - Dr[gi] * inv) * white;
-      out[o + 1] = Dg[gi] * inv + (1 - Dg[gi] * inv) * white;
-      out[o + 2] = Db[gi] * inv + (1 - Db[gi] * inv) * white;
+      const white = Math.min(1, Math.max(E * 1.35, flash)) * (1 - divMask);
+      let rr = Dr[gi] * inv + (1 - Dr[gi] * inv) * white;
+      let gg = Dg[gi] * inv + (1 - Dg[gi] * inv) * white;
+      let bb = Db[gi] * inv + (1 - Db[gi] * inv) * white;
+      if (divMask > 0.005) {
+        // franja divisoria del mismo tono oscuro que el fondo (#121315) sin eliminar partículas físicas
+        rr += (bgR - rr) * divMask;
+        gg += (bgG - gg) * divMask;
+        bb += (bgB - bb) * divMask;
+      }
+      out[o] = rr; out[o + 1] = gg; out[o + 2] = bb;
       out[o + 3] = Math.floor(gl) + al * 0.99;
     }
     this.gridTex.needsUpdate = true;

@@ -12,7 +12,6 @@ const CLIP_LEN = 3.5, CROSSFADE = 0.8;       // clips del hero
 const HERO_EXIT = 0.18, HERO_ENTER = 0.12;   // umbral de scroll (fracción de viewport)
 const RING_MID = 0.88;                       // punto medio / zona de reposo de Sección 2 (arma la compresión al subir)
 const ABOUT_ENTER = 1.40, ABOUT_EXIT = 1.30;
-const JUNCTION_MARGIN = 0.10;                // 10 % del arco junto a cada frontera
 const PREVIEW_OPEN_S = 0.42, DETAIL_OPEN_S = 0.55, SCROLL_COOLDOWN_MS = 650, VIDEO_OPEN_S = 0.42;
 const BG_SWITCH_S = 0.6;
 const TINT_MAX = 0.07, TINT_RATE = 3.7;
@@ -63,7 +62,9 @@ async function boot() {
 function start(projects, canvas, gl2, FONT) {
   const N = projects.length;
   const SEG = (Math.PI * 2) / N;
-  const ACTIVE_HALF = SEG * (0.5 - JUNCTION_MARGIN);   // rango angular activo [mid - ACTIVE_HALF, mid + ACTIVE_HALF]
+  const BORDER_DEAD_RAD = 3.5 * Math.PI / 180;         // ±3.5° exclusiva para la delgada frontera divisoria
+  const BORDER_DEAD_F = BORDER_DEAD_RAD / SEG;
+  const ACTIVE_HALF = SEG * 0.5 - BORDER_DEAD_RAD;     // rango angular activo original [thetaStart_k, thetaEnd_k] del segmento
 
   const renderer = new THREE.WebGLRenderer({ canvas, context: gl2, antialias: false, alpha: false });
   renderer.setClearColor(new THREE.Color().setRGB(BASE_BG[0], BASE_BG[1], BASE_BG[2]), 1);
@@ -120,8 +121,8 @@ function start(projects, canvas, gl2, FONT) {
   const entryScale = new Float32Array(N);
   let previewTheta = Math.PI / 2, previewThetaTarget = Math.PI / 2;
   let prevAritoX = 0, prevAritoY = 0, prevAritoOn = false;
-  // retardo inteligente por quietud (velocity-gated dwell) antes de abrir RING_PREVIEW
-  let dwellSeg = -1, dwellMs = 0, dwellAngle = Math.PI / 2;
+  // temporizador adaptativo por velocidad y conquista visual del aro (dwellProgress ∈ [0, 1])
+  let hoveredSegmentId = -1, dwellProgress = 0, cursorOnHoveredSeg = false;
   let textPosX = 0, textPosY = 0, textPosInit = false;
   let cursorWasInsideRect = false;
   const junction = { idx: -1 };
@@ -163,6 +164,7 @@ function start(projects, canvas, gl2, FONT) {
         // detonación explosiva desde el aro comprimido al 50 % → reconstrucción limpia sin elasticidad
         hasReachedRingMidpoint = false; compressP = 0; chargeSm = 0; R = R_base;
         previewWanted = false; previewId = -1; entryScale.fill(0); junction.idx = -1;
+        hoveredSegmentId = -1; dwellProgress = 0;
         ps.detonateToHero();
       } else {
         ps.burstToHero();
@@ -444,9 +446,10 @@ function start(projects, canvas, gl2, FONT) {
     }
     if (state === STATE.RING_PREVIEW && previewId >= 0 && entryScale[previewId] > 0.35 && cursorInArito()) {
       openDetail();
-    } else if (state === STATE.RING_IDLE && dwellSeg >= 0 && cur.valid) {
-      // clic directo sobre un segmento mientras carga el retardo → abre el «arito» inmediatamente
-      openPreviewSegment(dwellSeg);
+    } else if (state === STATE.RING_IDLE && cursorOnHoveredSeg && hoveredSegmentId >= 0 && cur.valid) {
+      // atajo por clic sobre un segmento en RING_IDLE → completa la conquista y abre RING_PREVIEW al instante
+      dwellProgress = 1.0;
+      openPreviewSegment(hoveredSegmentId);
     }
   });
   window.addEventListener('wheel', (e) => {
@@ -502,25 +505,30 @@ function start(projects, canvas, gl2, FONT) {
       mosaicT = 0; textPosInit = false; prevAritoOn = false;
       previewTheta = previewThetaTarget = proj;
     } else if (!previewWanted) {
+      entryScale[previewId] = 0;
       mosaicT = 0;
-      if (entryScale[previewId] < 0.05) previewTheta = previewThetaTarget = proj;
+      previewTheta = previewThetaTarget = proj;
     }
     previewWanted = true; junction.idx = -1;
-    dwellSeg = -1; dwellMs = 0;
+    hoveredSegmentId = id; dwellProgress = 1.0;
     setState(STATE.RING_PREVIEW);
   }
 
   function ringHitTest(dt) {
-    if (!RING_STATES.has(state)) { dwellSeg = -1; dwellMs = 0; return; }
+    if (!RING_STATES.has(state)) {
+      cursorOnHoveredSeg = false;
+      if (state !== STATE.DETAIL_RECT) { hoveredSegmentId = -1; dwellProgress = 0; }
+      return;
+    }
     let want = { type: 'none' };
     if (cur.valid) {
       const x = cur.x, y = cur.y, r = Math.hypot(x, y);
-      // 1) dentro de la corona activa del aro
+      // 1) dentro de la corona activa del aro (límites lógicos originales en reposo; solo excluye ±3.5° de frontera)
       const inBand = Math.abs(r - R) < 0.14 * R + RING_RB;
       if (inBand) {
         const { k, f } = segmentAt(Math.atan2(y, x), N);
-        if (f < JUNCTION_MARGIN || f > 1 - JUNCTION_MARGIN) {
-          const jIdx = f < JUNCTION_MARGIN ? (k + N - 1) % N : k;
+        if (f < BORDER_DEAD_F || f > 1 - BORDER_DEAD_F) {
+          const jIdx = f < BORDER_DEAD_F ? (k + N - 1) % N : k;
           want = { type: 'junction', idx: jIdx };
         } else {
           want = { type: 'preview', id: k };
@@ -536,35 +544,40 @@ function start(projects, canvas, gl2, FONT) {
     }
 
     if (want.type === 'preview') {
-      // si el «arito» ya está abierto en este mismo segmento, continúa sin interrupciones ni re-retardo
+      cursorOnHoveredSeg = true;
+      // si RING_PREVIEW ya está activo en este mismo segmento, mantiene conquista 100 % y «arito» abierto
       if (state === STATE.RING_PREVIEW && previewWanted && previewId === want.id) {
-        dwellSeg = -1; dwellMs = 0;
+        hoveredSegmentId = want.id; dwellProgress = 1.0;
         return;
       }
-      // si saltó desde otro segmento distinto, cierra el anterior y exige retardo en el nuevo
+      // si cambió de segmento, cierra el anterior y reinicia el contador desde 0 para el nuevo segmento
       if (state === STATE.RING_PREVIEW && previewId !== want.id) {
         previewWanted = false;
         setState(STATE.RING_IDLE);
       }
-      if (dwellSeg !== want.id) { dwellSeg = want.id; dwellMs = 0; }
-      dwellAngle = Math.atan2(cur.y, cur.x);
-      // temporizador condicionado por velocidad (velocity-gated dwell)
-      if (cur.speed <= PHYSICS_CONFIG.previewDwellMaxCursorSpeed) {
-        dwellMs = Math.min(PHYSICS_CONFIG.previewHoverDelayMs, dwellMs + dt * 1000);
-      } else {
-        dwellMs = Math.max(0, dwellMs - dt * 1800);
-      }
-      if (dwellMs >= PHYSICS_CONFIG.previewHoverDelayMs) {
+      if (hoveredSegmentId !== want.id) { hoveredSegmentId = want.id; dwellProgress = 0; }
+      // contador continuo de velocidad adaptativa: quieto = 0.35 s, en movimiento ≈ 2.8× más lento
+      const moveFactor = clamp01(cur.speed / PHYSICS_CONFIG.dwellSpeedRefPxPerSec);
+      const rate = lerp(1.0, 1.0 / PHYSICS_CONFIG.dwellMovingSlowdown, moveFactor);
+      dwellProgress = Math.min(1.0, dwellProgress + (dt * 1000 / PHYSICS_CONFIG.dwellBaseDurationMs) * rate);
+
+      if (dwellProgress >= 1.0) {
+        // activación automática de RING_PREVIEW al completar la conquista sin requerir clic
         openPreviewSegment(want.id);
       } else {
         previewWanted = false; junction.idx = -1; setState(STATE.RING_IDLE);
       }
-    } else if (want.type === 'junction') {
-      dwellSeg = -1; dwellMs = 0;
-      previewWanted = false; junction.idx = want.idx; setState(STATE.RING_JUNCTION);
     } else {
-      dwellSeg = -1; dwellMs = 0;
-      previewWanted = false; junction.idx = -1; setState(STATE.RING_IDLE);
+      cursorOnHoveredSeg = false;
+      previewWanted = false;
+      // retroceso suave del contador y líneas divisorias hacia sus fronteras originales
+      dwellProgress = Math.max(0, dwellProgress - (dt * 1000 / PHYSICS_CONFIG.dwellRetractDurationMs));
+      if (dwellProgress <= 0.001) { dwellProgress = 0; hoveredSegmentId = -1; }
+      if (want.type === 'junction') {
+        junction.idx = want.idx; setState(STATE.RING_JUNCTION);
+      } else {
+        junction.idx = -1; setState(STATE.RING_IDLE);
+      }
     }
   }
 
@@ -590,10 +603,13 @@ function start(projects, canvas, gl2, FONT) {
 
   function frame(now) {
     requestAnimationFrame(frame);
-    const dt = Math.min((now - last) / 1000, 1 / 30); last = now; t += dt;
+    // protege dt > 0 en el primer frame para evitar 0/0 = NaN en cur.vx/cur.speed
+    const dt = Math.max(1 / 240, Math.min((now - last) / 1000, 1 / 30)); last = now; t += dt;
 
     // velocidad suavizada del cursor (px/s)
     const kv = expK(25, dt);
+    if (!Number.isFinite(cur.vx)) cur.vx = 0;
+    if (!Number.isFinite(cur.vy)) cur.vy = 0;
     cur.vx += (accDx / dt - cur.vx) * kv; cur.vy += (-accDy / dt - cur.vy) * kv;
     accDx = accDy = 0;
     cur.speed = Math.hypot(cur.vx, cur.vy);
@@ -620,9 +636,9 @@ function start(projects, canvas, gl2, FONT) {
     const d = easeInOutCubic(detailP);
     const vidR = currentVideoRadius();
 
-    const dwellP = dwellSeg >= 0 ? clamp01(dwellMs / Math.max(1, PHYSICS_CONFIG.previewHoverDelayMs)) : 0;
+    const conqP = easeInOutCubic(dwellProgress);
     const aritoClickable = state === STATE.RING_PREVIEW && cur.valid && previewId >= 0 && entryScale[previewId] > 0.35 && cursorInArito();
-    bodyEl.style.cursor = (aritoClickable || dwellP > 0.12) ? 'pointer' : '';
+    bodyEl.style.cursor = (aritoClickable || (state === STATE.RING_IDLE && cursorOnHoveredSeg && hoveredSegmentId >= 0)) ? 'pointer' : '';
 
     // --- fondo reactivo por sección ---
     const bgAmt = (1 - (1 - BG_RING_LEVEL) * smooth(0.14, 0.5, scrollP)) * (1 - smooth(1.15, 1.55, scrollP));
@@ -741,7 +757,7 @@ function start(projects, canvas, gl2, FONT) {
       pusher,
       ringActive: RING_STATES.has(state),
       charge: RING_STATES.has(state) ? chargeSm : 0,
-      dwellP, dwellAng: dwellAngle,
+      conqSeg: hoveredSegmentId, conqP,
       isDetail: state === STATE.DETAIL_RECT,
       curInsideRect, curWasInsideRect: cursorWasInsideRect,
     });
@@ -750,10 +766,11 @@ function start(projects, canvas, gl2, FONT) {
     cursorWasInsideRect = curInsideRect;
     booted = true;
 
-    // --- uniformes de fondo + tinte + blackout ---
-    const tintTarget = (state === STATE.RING_PREVIEW || state === STATE.DETAIL_RECT) && previewId >= 0 ? 1 : 0;
+    // --- uniformes de fondo + tinte ambiental (acompaña también la fase de conquista del segmento) ---
+    const tintSeg = state === STATE.DETAIL_RECT ? previewId : (hoveredSegmentId >= 0 && dwellProgress > 0.02 ? hoveredSegmentId : (state === STATE.RING_PREVIEW ? previewId : -1));
+    const tintTarget = tintSeg >= 0 ? (state === STATE.RING_IDLE ? clamp01(conqP * 0.9) : 1) : 0;
     tintAmt += (tintTarget - tintAmt) * expK(TINT_RATE, dt);
-    if (previewId >= 0) { const tc = colorsRef[previewId], kc = expK(TINT_RATE, dt); for (let c = 0; c < 3; c++) tintCol[c] += (tc[c] - tintCol[c]) * kc; }
+    if (tintSeg >= 0) { const tc = colorsRef[tintSeg], kc = expK(TINT_RATE, dt); for (let c = 0; c < 3; c++) tintCol[c] += (tc[c] - tintCol[c]) * kc; }
     const bu = bgMat.uniforms;
     bu.tA.value = videos.getTexture(bgA); bu.tB.value = videos.getTexture(bgB);
     bu.uMix.value = bgMix; bu.uTime.value = t; bu.uBgAmt.value = bgAmt;
