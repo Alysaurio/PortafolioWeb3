@@ -11,12 +11,18 @@ export const PHYSICS_CONFIG = {
   charset: ['.', ':', ';', '=', '+', 'x', '#', '%', '@'],   // rampa Técnica (baja → alta densidad)
   cellSize: GRID_CELL_SIZE,          // fuente única compartida con BG_FS y GRID_FS (7 px CSS)
   particleCount: { low: 2600, mid: 2900, high: 3200 },   // pool fijo estrictamente conservado
-  pushForce: 1.00,                   // impulso del cursor en estado base
-  previewInnerPushScale: 0.35,       // empuje moderado del círculo del vídeo del «arito» (32–38 %)
+  pushForce: 0.52,                   // impulso recalibrado en estado base (controlado y elegante)
+  maxDispersionSpeed: 460,           // px/s, tope de velocidad en dispersión de humo (420–480 px/s)
+  previewPushMultiplier: 0.40,       // multiplicador relativo con «arito» activo (efectivo ~0.21)
+  previewHoverDelayMs: 520,          // ms de quietud sobre un segmento antes de abrir el «arito» (editable hasta 1000)
+  previewDwellMaxCursorSpeed: 190,   // px/s, velocidad máxima para cargar el retardo de apertura
+  ringColorMode: 'vibrantAccent',    // calibración cromática del aro: 'vibrantAccent' | 'dominant' | 'complementary'
   magneticBrake: 0.20,               // 20 % — leve rebote elástico en el Aro y Hero
   cursorRadius: 85,                  // px, radio base restaurado (sin «arito» activo)
-  xsphCohesion: 0.30,                // arrastre de vecinas (XSPH) en Fase 1
-  dispersionDrag: 0.96,              // fricción viscosa por frame@60fps en Fase 1
+  xsphCohesion: 0.30,                // arrastre de vecinas (XSPH)
+  dispersionDrag: 0.94,              // fricción atmosférica progresiva en Fase 1 (0.935–0.945)
+  smokeCurlStrength: 340,            // px/s², turbulencia curl-noise 2D tipo aro de humo
+  smokeMaxSplatRadius: 2.45,         // celdas, expansión volumétrica del splatting durante dispersión (1.0 → ~2.45)
   apexDelayMs: 220,                  // pausa en el ápice antes de detonar Fase 2
   returnAcceleration: 72,            // rigidez (1/s²) de Fase 2 en Aro / Hero
   returnDamping: 0.12,
@@ -260,6 +266,7 @@ export class ParticleSystem {
     this.timer = new Float32Array(n); this.t1 = new Float32Array(n); this.settle = new Float32Array(n);
     this.arrived = new Uint8Array(n); this.heat = new Float32Array(n); this.rnd = new Float32Array(n);
     this.emerge = new Float32Array(n).fill(1);
+    this.puff = new Float32Array(n);         // factor de expansión volumétrica de humo [0..1] (1.0 → ~2.45 celdas)
     this.bhPulled = new Uint8Array(n);       // partículas de ALYSAURIO ya desprendidas por el agujero negro
     this.hasTarget = new Uint8Array(n);
     this.clusterFlight = new Uint8Array(n);  // micro-cúmulo regenerativo en vuelo (cohesión XSPH + leve curvatura)
@@ -336,7 +343,7 @@ export class ParticleSystem {
       pusher: null,
       jx: 0, jy: 0, jr: 0, jtx: 0, jty: 0, jtr: 0,
       L: 0, LT: 0, lrb: 13, ropeH: 400, ro: null,
-      ringActive: false, charge: 0,
+      ringActive: false, charge: 0, dwellP: 0, dwellAng: 0,
     };
   }
 
@@ -394,7 +401,7 @@ export class ParticleSystem {
     const pts = this._stratified();
     this._assignTextTargets();
     this.heroNoBounce = false; this.heroNoBounceTimer = 0;
-    this.clusterFlight.fill(0);
+    this.clusterFlight.fill(0); this.puff.fill(0);
     for (let i = 0; i < this.n; i++) {
       this.bdx[i] = pts[i][0]; this.bdy[i] = pts[i][1];
       this.phase[i] = 4; this.timer[i] = C.burstTime * (0.85 + this.rnd[i] * 0.3);
@@ -422,7 +429,7 @@ export class ParticleSystem {
 
   foldHeroToRing(R, rb) {
     this.heroNoBounce = false; this.heroNoBounceTimer = 0;
-    this.clusterFlight.fill(0);
+    this.clusterFlight.fill(0); this.puff.fill(0);
     const halfW = Math.max(80, this.textHalfW);
     const n = this.n;
     for (let i = 0; i < n; i++) {
@@ -618,6 +625,7 @@ export class ParticleSystem {
     S.mode = t.mode; S.R = t.R; S.rb = t.rb;
     S.ringActive = !!t.ringActive;
     S.charge = t.charge || 0;
+    S.dwellP = t.dwellP || 0; S.dwellAng = t.dwellAng || 0;
     S.isDetail = !!t.isDetail;
     S.curInsideRect = !!t.curInsideRect;
     S.curWasInsideRect = !!t.curWasInsideRect;
@@ -1204,11 +1212,13 @@ export class ParticleSystem {
 
     const phase = this.phase, timer = this.timer, t1 = this.t1, settle = this.settle, arrived = this.arrived;
     const heat = this.heat, rnd = this.rnd, en = this.en, ccr = this.cr, ccg = this.cg, ccb = this.cb;
-    const hasT = this.hasTarget, txA = this.tx, tyA = this.ty, emerge = this.emerge;
+    const hasT = this.hasTarget, txA = this.tx, tyA = this.ty, emerge = this.emerge, puff = this.puff;
     const clFlight = this.clusterFlight, clCurve = this.clusterCurve;
     const charge = S.ringActive && !S.isDetail ? S.charge : 0;
     const c2 = charge * charge, cFreq = 18 + 38 * charge;
     const dragK = Math.pow(C.dispersionDrag, dt * 60), xsphK = C.xsphCohesion * Math.min(1, dt * 60);
+    const dispVmax = C.maxDispersionSpeed, dispVmax2 = dispVmax * dispVmax;
+    const puffGrowK = 1 - Math.exp(-6.5 * dt), puffCompK = 1 - Math.exp(-13 * dt), puffDecay = Math.exp(-13 * dt);
     const Kret = C.returnAcceleration, wRet = Math.sqrt(Kret), cRet = 2 * C.returnDamping * wRet;
     const Kset = C.settleStiffness, cSet = 2 * C.settleDamping * Math.sqrt(Kset);
     // parámetros sobreamortiguados para DETAIL_RECT (cero rebote)
@@ -1227,17 +1237,22 @@ export class ParticleSystem {
       let ph = phase[i];
       if (emerge[i] < 1) emerge[i] = Math.min(1, emerge[i] + dt * 6.5);
 
-      // 1) impulso del cursor o del círculo del «arito» (cápsula barrida)
+      // 1) impulso del cursor o del círculo del «arito» (expansión radial/lateral tipo aro de humo + tope contenido)
       if (capActive) {
         const l = ((x - ppx) * sx + (y - ppy) * sy) / sl2, s = l < 0 ? 0 : l > 1 ? 1 : l;
         const dx = x - (ppx + sx * s), dy = y - (ppy + sy * s), d2 = dx * dx + dy * dy;
         if (d2 < cr2) {
-          const d = Math.sqrt(d2), f = 1 - d / cr0, f2 = f * f;
+          const d = Math.sqrt(d2) + 1e-4, f = 1 - d / cr0, f2 = f * f;
           const side = (ux * dy - uy * dx) >= 0 ? 1 : -1;
-          const mag = cspeed * 0.55 * pushMul * f2;
-          vx += ux * mag - uy * side * mag * 0.30 + (rnd[i] - 0.5) * mag * 0.25;
-          vy += uy * mag + ux * side * mag * 0.30 + (Math.random() - 0.5) * mag * 0.25;
-          ph = 1; t1[i] = 0; arrived[i] = 0; hasT[i] = 0;
+          const rdx = dx / d, rdy = dy / d;
+          const mag = Math.min(cspeed, 2400) * 0.55 * pushMul * f2;
+          // apertura radial/lateral + dispersión gaseosa en vez de empujar en hilo compacto
+          const angJ = rnd[i] * TWO_PI + t * 1.3;
+          vx += ux * mag * 0.68 + rdx * mag * 0.42 - uy * side * mag * 0.36 + Math.cos(angJ) * mag * 0.28;
+          vy += uy * mag * 0.68 + rdy * mag * 0.42 + ux * side * mag * 0.36 + Math.sin(angJ) * mag * 0.28;
+          const v2 = vx * vx + vy * vy;
+          if (v2 > dispVmax2) { const sc = dispVmax / Math.sqrt(v2); vx *= sc; vy *= sc; }
+          ph = 1; t1[i] = 0; arrived[i] = 0; hasT[i] = 0; clFlight[i] = 0;
         }
       }
 
@@ -1321,11 +1336,38 @@ export class ParticleSystem {
         px[i] = x; py[i] = y; vxA[i] = vx; vyA[i] = vy; phase[i] = ph;
         en[i] = Math.min(1, Math.hypot(vx, vy) / 2200) * 0.6;
         continue;
-      } else if (ph === 1) {                              // FASE 1 — humo inercial (retorno = 0 %)
-        ax += prx * 900 + C.turbulence * Math.sin(y * 0.021 + t * 3.1 + rnd[i] * 6.28);
-        ay += pry * 900 + C.turbulence * Math.cos(x * 0.019 + t * 2.7 + rnd[i] * 6.28);
-        if (sw > 0.01) { const k = xsphK * Math.min(1, sw); vx += (svx / sw - vx) * k; vy += (svy / sw - vy) * k; }
-        vx += ax * dt; vy += ay * dt; vx *= dragK; vy *= dragK;
+      } else if (ph === 1) {                              // FASE 1 — expansión volumétrica tipo «aro de humo» (retorno = 0 %)
+        if (isDetail) {
+          // conserva intacta la estela de salida en DETAIL_RECT
+          ax += prx * 900 + C.turbulence * Math.sin(y * 0.021 + t * 3.1 + rnd[i] * 6.28);
+          ay += pry * 900 + C.turbulence * Math.cos(x * 0.019 + t * 2.7 + rnd[i] * 6.28);
+          if (sw > 0.01) { const k = xsphK * Math.min(1, sw); vx += (svx / sw - vx) * k; vy += (svy / sw - vy) * k; }
+          vx += ax * dt; vy += ay * dt; vx *= dragK; vy *= dragK;
+          puff[i] *= puffDecay;
+        } else {
+          // curl noise 2D libre de divergencia (volutas suaves) + presión de expansión lateral/radial
+          const p1x = 0.017 * x + 1.3 * t, p1y = 0.017 * y - 1.1 * t;
+          const p2 = 0.031 * y - 0.023 * x + 2.1 * t;
+          const c2cos = Math.cos(p2);
+          const curlX = (-Math.sin(p1x) * Math.sin(p1y) + 0.95 * c2cos) * C.smokeCurlStrength;
+          const curlY = (-Math.cos(p1x) * Math.cos(p1y) + 0.72 * c2cos) * C.smokeCurlStrength;
+          // expansión gaseosa: empuje de presión de vecinos + divergencia radial suave
+          ax += prx * 1450 + rx * 420 + curlX;
+          ay += pry * 1450 + ry * 420 + curlY;
+          // cohesión direccional XSPH reducida al dispersarse rápido (evita «hilos» rígidos)
+          if (sw > 0.01) {
+            const xScale = 0.16 + 0.24 * Math.min(1, t1[i] / 0.55);
+            const k = xsphK * xScale * Math.min(1, sw);
+            vx += (svx / sw - vx) * k; vy += (svy / sw - vy) * k;
+          }
+          vx += ax * dt; vy += ay * dt; vx *= dragK; vy *= dragK;
+          const spNow2 = vx * vx + vy * vy;
+          if (spNow2 > dispVmax2) { const sc = dispVmax / Math.sqrt(spNow2); vx *= sc; vy *= sc; }
+          // aumenta el volumen de splatting (puffFactor 0 → 1) conforme se expande lejos del aro
+          const dRing = Math.abs(Math.hypot(x, y) - S.R);
+          const pTgt = Math.min(1, t1[i] * 2.2 + Math.max(0, dRing - S.rb * 0.8) / 72);
+          puff[i] += (pTgt - puff[i]) * puffGrowK;
+        }
         t1[i] += dt;
         const sp2 = vx * vx + vy * vy;
         if ((sp2 < C.apexSpeed * C.apexSpeed && t1[i] > 0.1) || t1[i] > C.smokeMax) {
@@ -1334,6 +1376,11 @@ export class ParticleSystem {
       } else if (ph === 2) {                              // pausa en el ápice (o escalonamiento 0–65 ms de micro-cúmulo)
         vx += ax * dt; vy += ay * dt;
         const k = Math.exp(-14 * dt); vx *= k; vy *= k;
+        if (!isDetail && S.ringActive && !clFlight[i]) {
+          puff[i] += (Math.min(1, puff[i] + 0.12) - puff[i]) * puffGrowK;
+        } else {
+          puff[i] *= puffDecay;
+        }
         timer[i] -= dt;
         if (timer[i] <= 0) {
           ph = 3; heat[i] = 1; arrived[i] = 0; settle[i] = C.settleTime;
@@ -1392,6 +1439,7 @@ export class ParticleSystem {
         }
 
         if (ph === 0) {
+          if (puff[i] > 0) { puff[i] *= puffDecay; if (puff[i] < 0.02) puff[i] = 0; }
           ax += rx * C.spacing; ay += ry * C.spacing;
           if (isDetail) {
             // anclaje sobreamortiguado en DETAIL_RECT: cero oscilaciones, sigue ondas y abombamiento interno suave
@@ -1439,6 +1487,12 @@ export class ParticleSystem {
         } else {
           // FASE 2 simbiótica violenta con freno magnético al 20 % (Aro / Hero / Arito)
           const e = hasT[i] ? sd : (sd + inset);
+          // compresión volumétrica al retornar hacia el aro (splatRadius se contrae rápidamente hacia 1.0)
+          if (puff[i] > 0) {
+            const targetPuff = arrived[i] ? 0 : Math.min(0.7, Math.max(0, sd / 100)) * 0.65;
+            puff[i] += (targetPuff - puff[i]) * puffCompK;
+            if (puff[i] < 0.02) puff[i] = 0;
+          }
           ax += rx * C.spacing * 0.35; ay += ry * C.spacing * 0.35;
           // cohesión XSPH ligera en micro-cúmulos regenerativos → forma gotas/filamentos coalescentes
           if (clFlight[i] && !arrived[i] && sw > 0.01) {
@@ -1502,24 +1556,50 @@ export class ParticleSystem {
     const S = this.S, n = this.n, cs = C.cellSize, gw = this.gw, gh = this.gh, hW = this.W * 0.5, hH = this.H * 0.5;
     const Dm = this.Dm, Dr = this.Dr, Dg = this.Dg, Db = this.Db, De = this.De;
     Dm.fill(0); Dr.fill(0); Dg.fill(0); Db.fill(0); De.fill(0);
-    const inv2s = 1 / (2 * C.kernelSigma * C.kernelSigma), w9 = this._w9 || (this._w9 = new Float32Array(9));
-    const px = this.px, py = this.py, emerge = this.emerge;
+    const inv2s = 1 / (2 * C.kernelSigma * C.kernelSigma);
+    const w9 = this._w9 || (this._w9 = new Float32Array(9));
+    const w25 = this._w25 || (this._w25 = new Float32Array(25));
+    const px = this.px, py = this.py, emerge = this.emerge, puff = this.puff;
+    const puffSpan = Math.max(0.2, C.smokeMaxSplatRadius - 1.0);
 
     for (let i = 0; i < n; i++) {
       // origen superior-izquierdo unificado con BG_FS y GRID_FS
       const gx = (px[i] + hW) / cs, gy = (hH - py[i]) / cs, cx = Math.floor(gx), cy = Math.floor(gy);
-      let sum = 0, q = 0;
-      for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++, q++) {
-        const dx = gx - (cx + ox + 0.5), dy = gy - (cy + oy + 0.5);
-        const w = Math.exp(-(dx * dx + dy * dy) * inv2s); w9[q] = w; sum += w;
-      }
-      const inv = emerge[i] / sum, e = this.en[i], r = this.cr[i], g = this.cg[i], b = this.cb[i];
-      q = 0;
-      for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++, q++) {
-        const xx = cx + ox, yy = cy + oy;
-        if (xx < 0 || yy < 0 || xx >= gw || yy >= gh) continue;
-        const w = w9[q] * inv, gi = yy * gw + xx;
-        Dm[gi] += w; Dr[gi] += w * r; Dg[gi] += w * g; Db[gi] += w * b; De[gi] += w * e;
+      const pf = S.ringActive && !S.isDetail ? puff[i] : 0;
+      const e = this.en[i], r = this.cr[i], g = this.cg[i], b = this.cb[i];
+      if (pf <= 0.05) {
+        // estado cohesionado: splatRadius = 1.0 (huella compacta 3×3 nítida)
+        let sum = 0, q = 0;
+        for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++, q++) {
+          const dx = gx - (cx + ox + 0.5), dy = gy - (cy + oy + 0.5);
+          const w = Math.exp(-(dx * dx + dy * dy) * inv2s); w9[q] = w; sum += w;
+        }
+        const inv = emerge[i] / sum;
+        q = 0;
+        for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++, q++) {
+          const xx = cx + ox, yy = cy + oy;
+          if (xx < 0 || yy < 0 || xx >= gw || yy >= gh) continue;
+          const w = w9[q] * inv, gi = yy * gw + xx;
+          Dm[gi] += w; Dr[gi] += w * r; Dg[gi] += w * g; Db[gi] += w * b; De[gi] += w * e;
+        }
+      } else {
+        // dispersión tipo «aro de humo»: amplía splatRadius (1.0 → ~2.45 celdas) sobre huella 5×5 distribuyendo masa
+        const rad = 1.0 + pf * puffSpan;
+        const sig = C.kernelSigma * rad, inv2sP = 1 / (2 * sig * sig);
+        let sum = 0, q = 0;
+        for (let oy = -2; oy <= 2; oy++) for (let ox = -2; ox <= 2; ox++, q++) {
+          const dx = gx - (cx + ox + 0.5), dy = gy - (cy + oy + 0.5);
+          const w = Math.exp(-(dx * dx + dy * dy) * inv2sP); w25[q] = w; sum += w;
+        }
+        // ligero realce de masa (+22 %) para que la nube esponjosa (+ = ; : .) conserve presencia sin volverse invisible
+        const inv = (emerge[i] * (1.0 + 0.22 * pf)) / sum;
+        q = 0;
+        for (let oy = -2; oy <= 2; oy++) for (let ox = -2; ox <= 2; ox++, q++) {
+          const xx = cx + ox, yy = cy + oy;
+          if (xx < 0 || yy < 0 || xx >= gw || yy >= gh) continue;
+          const w = w25[q] * inv, gi = yy * gw + xx;
+          Dm[gi] += w; Dr[gi] += w * r; Dg[gi] += w * g; Db[gi] += w * b; De[gi] += w * e;
+        }
       }
     }
 
@@ -1543,6 +1623,8 @@ export class ParticleSystem {
 
     const out = this.gridData, size = gw * gh;
     const ch = S.ringActive && !S.isDetail ? S.charge : 0;
+    const dwP = S.ringActive && !S.isDetail ? S.dwellP : 0;
+    const dwAng = S.dwellAng, dwSpread = 0.14 + 0.22 * dwP, dwWave = 0.28 + 0.18 * Math.sin(t * 10.0);
     const flick = (t * (7 + 48 * ch * ch)) | 0;
     const boxOn = S.boxOn && S.boxD > 0.001;
     const bandW = Math.max(1, 2 * S.brb);
@@ -1568,6 +1650,19 @@ export class ParticleSystem {
         E = Math.min(1, E + (wCol * 0.42 + wSum * 0.06) * S.boxD);
       }
       let flash = 0;
+      if (dwP > 0.02) {
+        // micro-feedback sutil de carga de quietud localizado en el tramo bajo el cursor
+        const wx = ((gi % gw) + 0.5) * cs - hW, wy = hH - (((gi / gw) | 0) + 0.5) * cs;
+        const rr = Math.hypot(wx, wy);
+        if (Math.abs(rr - S.R) < S.rb * 1.65) {
+          const da = wrapAngle(Math.atan2(wy, wx) - dwAng);
+          if (Math.abs(da) < 0.55) {
+            const dp = dwP * Math.exp(-(da * da) / dwSpread) * dwWave;
+            L *= 1 + dp * 0.55;
+            E = Math.min(1, E + dp * 0.42);
+          }
+        }
+      }
       if (ch > 0.005) {
         // mutación frenética de glifos hacia x # % @ + calentamiento incandescente pulsante irregular
         const wx = ((gi % gw) + 0.5) * cs - hW, wy = hH - (((gi / gw) | 0) + 0.5) * cs;

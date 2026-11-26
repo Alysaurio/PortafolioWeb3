@@ -38,10 +38,21 @@ function hslToRgb([h, s, l]) {
 }
 const hslCss = (h, s, l, a = 1) => `hsla(${Math.round(((h % 1) + 1) % 1 * 360)},${Math.round(s * 100)}%,${Math.round(l * 100)}%,${a})`;
 
-/** Color apto para partículas/tinte: saturación controlada y luminosidad con buen contraste sobre #121315. */
-function toDisplay(rgb) {
+/** Color apto para partículas/tinte según ringColorMode ('vibrantAccent' | 'dominant' | 'complementary'). */
+function toDisplay(rgb, mode = 'vibrantAccent') {
   const [h, s, l] = rgbToHsl(rgb);
-  return hslToRgb([h, Math.min(Math.max(s, 0.35), 0.78), Math.min(Math.max(l, 0.5), 0.72)]);
+  if (mode === 'complementary') {
+    const compH = (h + 0.5) % 1;
+    const compS = Math.min(0.78, Math.max(s + 0.12, 0.42));
+    return hslToRgb([compH, compS, Math.min(0.72, Math.max(l, 0.52))]);
+  }
+  if (mode === 'dominant') {
+    return hslToRgb([h, Math.min(Math.max(s, 0.35), 0.78), Math.min(Math.max(l, 0.5), 0.72)]);
+  }
+  // 'vibrantAccent': realce controlado de saturación (+18 %) y piso de luminosidad sobre #121315
+  const vibS = Math.min(0.88, Math.max(s * 1.18 + 0.05, 0.46));
+  const vibL = Math.min(0.74, Math.max(l, 0.54));
+  return hslToRgb([h, vibS, vibL]);
 }
 
 /* ---------- vídeo procedural de respaldo ---------- */
@@ -116,6 +127,7 @@ export class VideoManager {
     this.lCanvas = document.createElement('canvas');
     this.lCanvas.width = LOCAL_W; this.lCanvas.height = LOCAL_H;
     this.lCtx = this.lCanvas.getContext('2d', { willReadFrequently: true });
+    this.colorMode = 'vibrantAccent';
     this.lastLocal = 0;
     this.lastSample = 0;
     this.lastFb = 0;
@@ -182,7 +194,9 @@ export class VideoManager {
     }
   }
 
-  update(t, dt, needed, localId = -1) {
+  update(t, dt, needed, localId = -1, colorMode = 'vibrantAccent') {
+    const modeChanged = colorMode !== this.colorMode;
+    this.colorMode = colorMode;
     if (localId >= 0 && t - this.lastLocal > 0.11) { this.lastLocal = t; this._sampleLocal(this.items[localId]); }
     if (localId >= 0) {
       const it = this.items[localId], k = 1 - Math.exp(-dt * 8);
@@ -193,8 +207,8 @@ export class VideoManager {
       this.lastFb = t;
       for (const it of this.items) if (!it.usingVideo && needed.has(it.index)) { it.fb.draw(t); it.fb.texture.needsUpdate = true; }
     }
-    // extracción de paleta a ~7 Hz
-    if (t - this.lastSample > SAMPLE_INTERVAL) {
+    // extracción de paleta a ~7 Hz (o inmediata si cambió el modo cromático)
+    if (modeChanged || t - this.lastSample > SAMPLE_INTERVAL) {
       this.lastSample = t;
       for (const it of this.items) {
         if (!it.usingVideo) it.fb.draw(t);
@@ -205,7 +219,7 @@ export class VideoManager {
     const k = 1 - Math.exp(-dt * 4);
     for (const it of this.items) {
       for (let c = 0; c < 3; c++) for (let j = 0; j < 3; j++) it.colors[c][j] += (it.targets[c][j] - it.colors[c][j]) * k;
-      it.display = toDisplay(it.colors[0]);
+      it.display = toDisplay(it.colors[0], this.colorMode);
     }
   }
 
@@ -220,6 +234,7 @@ export class VideoManager {
     const fallback = [item.base, hslToRgb([h + 0.08, s, l]), hslToRgb([h - 0.1, s, l])];
     if (!data) { item.targets = fallback; return; }
 
+    const vibrant = this.colorMode === 'vibrantAccent';
     const buckets = new Map();
     let maxLum = 0;
     for (let p = 0; p < 64; p++) {
@@ -228,10 +243,19 @@ export class VideoManager {
       maxLum = Math.max(maxLum, mx);
       if (mx < 24) continue;
       const sat = (mx - mn) / (mx || 1);
+      const chroma = (mx - mn) / 255;
+      const lum = (mx + mn) / 510;
       const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
       let bk = buckets.get(key);
       if (!bk) { bk = { r: 0, g: 0, b: 0, n: 0, score: 0 }; buckets.set(key, bk); }
-      bk.r += r; bk.g += g; bk.b += b; bk.n++; bk.score += 1 + sat * 2;
+      bk.r += r; bk.g += g; bk.b += b; bk.n++;
+      if (vibrant) {
+        // pondera fuertemente por croma/saturación y luminancia media para extraer un acento expresivo por proyecto
+        const lumW = Math.max(0.15, 1 - Math.abs(lum - 0.52) * 1.15);
+        bk.score += (0.14 + Math.pow(sat, 2.2) * 5.8 + chroma * 4.6) * lumW;
+      } else {
+        bk.score += 1 + sat * 1.6;
+      }
     }
     if (maxLum < 32 || buckets.size === 0) { item.targets = fallback; return; }   // fotograma negro → color de respaldo
 

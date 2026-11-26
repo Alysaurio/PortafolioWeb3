@@ -120,6 +120,8 @@ function start(projects, canvas, gl2, FONT) {
   const entryScale = new Float32Array(N);
   let previewTheta = Math.PI / 2, previewThetaTarget = Math.PI / 2;
   let prevAritoX = 0, prevAritoY = 0, prevAritoOn = false;
+  // retardo inteligente por quietud (velocity-gated dwell) antes de abrir RING_PREVIEW
+  let dwellSeg = -1, dwellMs = 0, dwellAngle = Math.PI / 2;
   let textPosX = 0, textPosY = 0, textPosInit = false;
   let cursorWasInsideRect = false;
   const junction = { idx: -1 };
@@ -440,7 +442,12 @@ function start(projects, canvas, gl2, FONT) {
       if (!cursorInsideBox()) closeDetail();
       return;
     }
-    if (state === STATE.RING_PREVIEW && previewId >= 0 && entryScale[previewId] > 0.35 && cursorInArito()) openDetail();
+    if (state === STATE.RING_PREVIEW && previewId >= 0 && entryScale[previewId] > 0.35 && cursorInArito()) {
+      openDetail();
+    } else if (state === STATE.RING_IDLE && dwellSeg >= 0 && cur.valid) {
+      // clic directo sobre un segmento mientras carga el retardo → abre el «arito» inmediatamente
+      openPreviewSegment(dwellSeg);
+    }
   });
   window.addEventListener('wheel', (e) => {
     if (bhMode !== 'idle') { e.preventDefault(); return; }
@@ -486,8 +493,25 @@ function start(projects, canvas, gl2, FONT) {
     }
   }
 
-  function ringHitTest() {
-    if (!RING_STATES.has(state)) return;
+  function openPreviewSegment(id) {
+    const mid = centerAngle(id, N);
+    const proj = mid + clamp(wrapAngle(Math.atan2(cur.y, cur.x) - mid), -ACTIVE_HALF, ACTIVE_HALF);
+    if (previewId !== id) {
+      previewId = id;
+      entryScale[previewId] = 0;
+      mosaicT = 0; textPosInit = false; prevAritoOn = false;
+      previewTheta = previewThetaTarget = proj;
+    } else if (!previewWanted) {
+      mosaicT = 0;
+      if (entryScale[previewId] < 0.05) previewTheta = previewThetaTarget = proj;
+    }
+    previewWanted = true; junction.idx = -1;
+    dwellSeg = -1; dwellMs = 0;
+    setState(STATE.RING_PREVIEW);
+  }
+
+  function ringHitTest(dt) {
+    if (!RING_STATES.has(state)) { dwellSeg = -1; dwellMs = 0; return; }
     let want = { type: 'none' };
     if (cur.valid) {
       const x = cur.x, y = cur.y, r = Math.hypot(x, y);
@@ -512,22 +536,34 @@ function start(projects, canvas, gl2, FONT) {
     }
 
     if (want.type === 'preview') {
-      const mid = centerAngle(want.id, N);
-      const proj = mid + clamp(wrapAngle(Math.atan2(cur.y, cur.x) - mid), -ACTIVE_HALF, ACTIVE_HALF);
-      if (previewId !== want.id) {
-        // reinicio estricto de escala independiente para el nuevo segmento (nunca hereda el tamaño del anterior)
-        previewId = want.id;
-        entryScale[previewId] = 0;
-        mosaicT = 0; textPosInit = false; prevAritoOn = false;
-        previewTheta = previewThetaTarget = proj;
-      } else if (!previewWanted) {
-        mosaicT = 0;
-        if (entryScale[previewId] < 0.05) previewTheta = previewThetaTarget = proj;
+      // si el «arito» ya está abierto en este mismo segmento, continúa sin interrupciones ni re-retardo
+      if (state === STATE.RING_PREVIEW && previewWanted && previewId === want.id) {
+        dwellSeg = -1; dwellMs = 0;
+        return;
       }
-      previewWanted = true; junction.idx = -1; setState(STATE.RING_PREVIEW);
+      // si saltó desde otro segmento distinto, cierra el anterior y exige retardo en el nuevo
+      if (state === STATE.RING_PREVIEW && previewId !== want.id) {
+        previewWanted = false;
+        setState(STATE.RING_IDLE);
+      }
+      if (dwellSeg !== want.id) { dwellSeg = want.id; dwellMs = 0; }
+      dwellAngle = Math.atan2(cur.y, cur.x);
+      // temporizador condicionado por velocidad (velocity-gated dwell)
+      if (cur.speed <= PHYSICS_CONFIG.previewDwellMaxCursorSpeed) {
+        dwellMs = Math.min(PHYSICS_CONFIG.previewHoverDelayMs, dwellMs + dt * 1000);
+      } else {
+        dwellMs = Math.max(0, dwellMs - dt * 1800);
+      }
+      if (dwellMs >= PHYSICS_CONFIG.previewHoverDelayMs) {
+        openPreviewSegment(want.id);
+      } else {
+        previewWanted = false; junction.idx = -1; setState(STATE.RING_IDLE);
+      }
     } else if (want.type === 'junction') {
+      dwellSeg = -1; dwellMs = 0;
       previewWanted = false; junction.idx = want.idx; setState(STATE.RING_JUNCTION);
     } else {
+      dwellSeg = -1; dwellMs = 0;
       previewWanted = false; junction.idx = -1; setState(STATE.RING_IDLE);
     }
   }
@@ -571,7 +607,7 @@ function start(projects, canvas, gl2, FONT) {
     R = R_base * (1.0 - 0.50 * chargeSm);
     const previewRbNow = PREVIEW_RB * lerp(1.0, 0.72, chargeSm);
 
-    ringHitTest();
+    ringHitTest(dt);
     updateRadialProjection(dt);
 
     // actualiza escalas de apertura independientes por proyecto
@@ -584,7 +620,9 @@ function start(projects, canvas, gl2, FONT) {
     const d = easeInOutCubic(detailP);
     const vidR = currentVideoRadius();
 
-    bodyEl.style.cursor = state === STATE.RING_PREVIEW && cur.valid && previewId >= 0 && entryScale[previewId] > 0.35 && cursorInArito() ? 'pointer' : '';
+    const dwellP = dwellSeg >= 0 ? clamp01(dwellMs / Math.max(1, PHYSICS_CONFIG.previewHoverDelayMs)) : 0;
+    const aritoClickable = state === STATE.RING_PREVIEW && cur.valid && previewId >= 0 && entryScale[previewId] > 0.35 && cursorInArito();
+    bodyEl.style.cursor = (aritoClickable || dwellP > 0.12) ? 'pointer' : '';
 
     // --- fondo reactivo por sección ---
     const bgAmt = (1 - (1 - BG_RING_LEVEL) * smooth(0.14, 0.5, scrollP)) * (1 - smooth(1.15, 1.55, scrollP));
@@ -609,7 +647,7 @@ function start(projects, canvas, gl2, FONT) {
     const cb = currentBox();
     const boxOn = !!cb && (vidR >= MIN_VIDEO_PX || detailP > 0.01);
     if (boxOn) needed.add(previewId);
-    videos.update(t, dt, needed, boxOn ? previewId : -1);
+    videos.update(t, dt, needed, boxOn ? previewId : -1, PHYSICS_CONFIG.ringColorMode);
     for (let k = 0; k < N; k++) colorsRef[k] = videos.getColor(k);
 
     // --- cascada temprana de absorción en HERO_TEXT (Etapa 2: textos >= 0.22 · Etapa 3: fondo 1:1 >= 0.55) ---
@@ -682,7 +720,7 @@ function start(projects, canvas, gl2, FONT) {
       const ax = Math.cos(previewTheta) * R, ay = Math.sin(previewTheta) * R;
       if (!prevAritoOn) { prevAritoX = ax; prevAritoY = ay; }
       const aSpd = Math.min(Math.hypot(ax - prevAritoX, ay - prevAritoY) / Math.max(dt, 1e-3), 4000);
-      const aPush = PHYSICS_CONFIG.previewInnerPushScale * (1 + Math.min(0.28, aSpd / 2400));
+      const aPush = PHYSICS_CONFIG.previewPushMultiplier * (1 + Math.min(0.24, aSpd / 2400));
       pusher = { x: ax, y: ay, px: prevAritoX, py: prevAritoY, radius: vidR, pushScale: aPush };
       prevAritoX = ax; prevAritoY = ay; prevAritoOn = true;
     } else {
@@ -703,6 +741,7 @@ function start(projects, canvas, gl2, FONT) {
       pusher,
       ringActive: RING_STATES.has(state),
       charge: RING_STATES.has(state) ? chargeSm : 0,
+      dwellP, dwellAng: dwellAngle,
       isDetail: state === STATE.DETAIL_RECT,
       curInsideRect, curWasInsideRect: cursorWasInsideRect,
     });
