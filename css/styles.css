@@ -43,10 +43,15 @@ body.bh-hide-dom #scroll-hint {
 }
 #scroll-hint {
   position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  padding-left: .3em; white-space: nowrap; text-align: center;
   font-size: 13px; letter-spacing: .3em; color: var(--fg2); z-index: 5; pointer-events: none;
+  will-change: opacity;
   animation: hint 2.4s ease-in-out infinite;
 }
-@keyframes hint { 0%, 100% { opacity: .35 } 50% { opacity: 1 } }
+@keyframes hint {
+  0%, 100% { color: rgb(76, 77, 80); }
+  50% { color: rgb(154, 154, 154); }
+}
 
 /* ---------- PREVIEW TITLE ---------- */
 #preview-title {

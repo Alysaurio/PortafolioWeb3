@@ -215,22 +215,70 @@ function sdfScene(S, x, y) {
   return d;
 }
 
-let oR = 1, oG = 1, oB = 1;
+let oR = 1, oG = 1, oB = 1, oW = 0;
 function arcColor(S, x, y) {
   const N = S.N, col = S.colors;
   const ang = Math.atan2(y, x);
-  if (S.conqSeg >= 0 && S.conqP > 0.001) {
-    const halfSpan = Math.PI / N;
-    const conqHalf = halfSpan + S.conqP * (Math.PI - halfSpan);
-    if (Math.abs(wrapAngle(ang - centerAngle(S.conqSeg, N))) <= conqHalf) {
-      const cc = col[S.conqSeg % N];
-      oR = cc[0]; oG = cc[1]; oB = cc[2];
-      return;
+  const { k, f } = segmentAt(ang, N);
+  const c = col[k % N];
+  let r = c[0], g = c[1], b = c[2];
+  oW = 0;
+
+  // degradado cromático orgánico estrecho (~7° totales = ±3.5°) entre segmentos adyacentes
+  if (N >= 2) {
+    const segRad = TWO_PI / N;
+    const gradHalf = 3.5 * Math.PI / 180;
+    const d0 = f * segRad, d1 = (1 - f) * segRad;
+    if (d0 < gradHalf) {
+      const prev = col[(k + N - 1) % N];
+      const t = 0.5 + 0.5 * (d0 / gradHalf);
+      const w = t * t * (3 - 2 * t);
+      r = prev[0] + (r - prev[0]) * w;
+      g = prev[1] + (g - prev[1]) * w;
+      b = prev[2] + (b - prev[2]) * w;
+    } else if (d1 < gradHalf) {
+      const next = col[(k + 1) % N];
+      const t = 0.5 + 0.5 * (d1 / gradHalf);
+      const w = t * t * (3 - 2 * t);
+      r = next[0] + (r - next[0]) * w;
+      g = next[1] + (g - next[1]) * w;
+      b = next[2] + (b - next[2]) * w;
     }
   }
-  const { k } = segmentAt(ang, N);
-  const c = col[k % N];
-  oR = c[0]; oG = c[1]; oB = c[2];
+
+  // onda de conquista integrada al material ASCII: degradado móvil (~6° = ±3°) + sutil pulso luminoso en la cresta
+  if (S.conqSeg >= 0 && S.conqP > 0.001) {
+    const frontHalf = 3.0 * Math.PI / 180;
+    const halfSpan = Math.PI / N;
+    const conqHalf = halfSpan + S.conqP * (Math.PI + frontHalf - halfSpan);
+    const ad = Math.abs(wrapAngle(ang - centerAngle(S.conqSeg, N)));
+    let u = (conqHalf + frontHalf - ad) / (2 * frontHalf);
+    u = u < 0 ? 0 : u > 1 ? 1 : u;
+    const fi = S.conqP < 0.06 ? (S.conqP / 0.06) : 1;
+    const cw = (u * u * (3 - 2 * u)) * (fi * fi * (3 - 2 * fi));
+    const cc = col[S.conqSeg % N];
+    r += (cc[0] - r) * cw;
+    g += (cc[1] - g) * cw;
+    b += (cc[2] - b) * cw;
+
+    const rawP = S.conqRawP;
+    if (rawP > 0.02 && rawP < 0.96) {
+      const dFront = Math.abs(ad - conqHalf);
+      if (dFront < frontHalf) {
+        let s0 = (rawP - 0.02) / 0.12; s0 = s0 < 0 ? 0 : s0 > 1 ? 1 : s0; s0 = s0 * s0 * (3 - 2 * s0);
+        let s1 = (0.96 - rawP) / 0.12; s1 = s1 < 0 ? 0 : s1 > 1 ? 1 : s1; s1 = s1 * s1 * (3 - 2 * s1);
+        const cf = 1 - dFront / frontHalf;
+        const crest = (cf * cf * (3 - 2 * cf)) * s0 * s1;
+        const boost = 0.22 * crest;
+        r += (1 - r) * boost;
+        g += (1 - g) * boost;
+        b += (1 - b) * boost;
+        oW = 0.15 * crest;
+      }
+    }
+  }
+
+  oR = r; oG = g; oB = b;
 }
 
 function propagate(mask, gw, gh) {
@@ -353,7 +401,7 @@ export class ParticleSystem {
       pusher: null,
       jx: 0, jy: 0, jr: 0, jtx: 0, jty: 0, jtr: 0,
       L: 0, LT: 0, lrb: 13, ropeH: 400, ro: null,
-      ringActive: false, charge: 0, conqSeg: -1, conqP: 0,
+      ringActive: false, charge: 0, conqSeg: -1, conqP: 0, conqRawP: 0,
     };
   }
 
@@ -637,6 +685,7 @@ export class ParticleSystem {
     S.charge = t.charge || 0;
     S.conqSeg = t.conqSeg !== undefined ? t.conqSeg : -1;
     S.conqP = t.conqP || 0;
+    S.conqRawP = t.conqRawP || 0;
     S.isDetail = !!t.isDetail;
     S.curInsideRect = !!t.curInsideRect;
     S.curWasInsideRect = !!t.curWasInsideRect;
@@ -1245,7 +1294,7 @@ export class ParticleSystem {
 
     for (let i = 0; i < n; i++) {
       let x = px[i], y = py[i], vx = vxA[i], vy = vyA[i];
-      let ph = phase[i];
+      let ph = phase[i], waveE = 0;
       if (emerge[i] < 1) emerge[i] = Math.min(1, emerge[i] + dt * 6.5);
 
       // 1) impulso del cursor o del círculo del «arito» (expansión radial/lateral tipo aro de humo + tope contenido)
@@ -1433,8 +1482,20 @@ export class ParticleSystem {
           const li = ((lv * LH | 0) * LW + (lu * LW | 0)) * 3;
           ccr[i] = local[li]; ccg[i] = local[li + 1]; ccb[i] = local[li + 2];
         } else if (comp >= 0 && sd < 1e8) {
-          if (comp === 0 || comp === 2) { arcColor(S, x, y); ccr[i] = oR; ccg[i] = oG; ccb[i] = oB; }
-          else if (comp === 1) {
+          if (comp === 0 || comp === 2) {
+            if (ph === 0 || arrived[i]) {
+              arcColor(S, x, y); ccr[i] = oR; ccg[i] = oG; ccb[i] = oB; waveE = oW;
+            } else if (hasT[i]) {
+              // micro-cúmulos y objetivos explícitos evalúan su ángulo destino sobre el aro (cero cambios al cruzar fronteras)
+              arcColor(S, txA[i], tyA[i]); ccr[i] = oR; ccg[i] = oG; ccb[i] = oB; waveE = oW;
+            } else if (sd < S.rb * 2.2) {
+              // humo libre regresando: mantiene su color intacto en el aire y se reintegra suavemente al tocar el aro
+              arcColor(S, x, y);
+              const ck = 1 - Math.exp(-8 * dt);
+              ccr[i] += (oR - ccr[i]) * ck; ccg[i] += (oG - ccg[i]) * ck; ccb[i] += (oB - ccb[i]) * ck;
+              waveE = oW * 0.5;
+            }
+          } else if (comp === 1) {
             arcColor(S, S.bx, S.by);
             let rr = oR, gg = oG, bb = oB;
             if (local && S.boxD > 0.01) {
@@ -1557,7 +1618,7 @@ export class ParticleSystem {
 
       if (heat[i] > 0) heat[i] = Math.max(0, heat[i] - dt * 2.6);
       const spd = Math.sqrt(vx * vx + vy * vy) / 2200;
-      en[i] = Math.min(1, Math.max(heat[i], spd));
+      en[i] = Math.min(1, Math.max(heat[i], spd, waveE));
     }
 
     this._splat(t, massScale);
@@ -1637,16 +1698,6 @@ export class ParticleSystem {
     const flick = (t * (7 + 48 * ch * ch)) | 0;
     const boxOn = S.boxOn && S.boxD > 0.001;
     const bandW = Math.max(1, 2 * S.brb);
-    // líneas divisorias sutiles tono-fondo (#121315) y fronteras de conquista sincronizadas con dwellProgress
-    const divOn = S.ringActive && !S.isDetail && S.boxD < 0.05 && S.N >= 2;
-    const conqSeg = S.conqSeg, conqP = S.conqP;
-    const segRad = TWO_PI / S.N, halfSpan = Math.PI / S.N;
-    const conqHalf = halfSpan + conqP * (Math.PI - halfSpan);
-    const conqMid = conqSeg >= 0 ? centerAngle(conqSeg, S.N) : 0;
-    const advFade = conqP <= 0.92 ? 1 : Math.max(0, 1 - (conqP - 0.92) / 0.08);
-    const divHalf = 1.8 * Math.PI / 180, divFeather = 1.0 * Math.PI / 180;
-    const aritoKeepR = S.boxOn && S.vidR > 2 ? (S.vidR + S.brb * 1.15) : 0;
-    const bgR = 0x12 / 255, bgG = 0x13 / 255, bgB = 0x15 / 255;
 
     for (let gi = 0; gi < size; gi++) {
       const m = Dm[gi], o = gi * 4;
@@ -1669,44 +1720,6 @@ export class ParticleSystem {
         L *= 1 + (p - 1) * S.boxD;
         E = Math.min(1, E + (wCol * 0.42 + wSum * 0.06) * S.boxD);
       }
-      let divMask = 0;
-      if (divOn) {
-        const wx = ((gi % gw) + 0.5) * cs - hW, wy = hH - (((gi / gw) | 0) + 0.5) * cs;
-        const rr = Math.hypot(wx, wy);
-        if (Math.abs(rr - S.R) < S.rb * 1.45 && (aritoKeepR <= 0 || Math.hypot(wx - S.bx, wy - S.by) > aritoKeepR)) {
-          const ang = Math.atan2(wy, wx);
-          if (conqSeg >= 0 && conqP > 0.001) {
-            const ad = Math.abs(wrapAngle(ang - conqMid));
-            let mAdv = 0;
-            if (advFade > 0.005) {
-              const dAdv = Math.abs(ad - conqHalf);
-              if (dAdv < divHalf + divFeather) {
-                let u = (dAdv - divHalf) / divFeather; u = u < 0 ? 0 : u > 1 ? 1 : u;
-                mAdv = (1 - u * u * (3 - 2 * u)) * advFade;
-              }
-            }
-            let mRest = 0;
-            if (ad > conqHalf && conqP < 0.995) {
-              const { f } = segmentAt(ang, S.N);
-              const dRest = Math.min(f, 1 - f) * segRad;
-              if (dRest < divHalf + divFeather) {
-                let u = (dRest - divHalf) / divFeather; u = u < 0 ? 0 : u > 1 ? 1 : u;
-                mRest = 1 - u * u * (3 - 2 * u);
-              }
-            }
-            divMask = mAdv > mRest ? mAdv : mRest;
-          } else {
-            const { f } = segmentAt(ang, S.N);
-            const dRest = Math.min(f, 1 - f) * segRad;
-            if (dRest < divHalf + divFeather) {
-              let u = (dRest - divHalf) / divFeather; u = u < 0 ? 0 : u > 1 ? 1 : u;
-              divMask = 1 - u * u * (3 - 2 * u);
-            }
-          }
-          // evita cortes en medio del chisporroteo incandescente de pre-explosión
-          if (ch > 0.2) divMask *= Math.max(0, 1 - (ch - 0.2) * 1.6);
-        }
-      }
       let flash = 0;
       if (ch > 0.005) {
         // mutación frenética de glifos hacia x # % @ + calentamiento incandescente pulsante irregular
@@ -1719,22 +1732,14 @@ export class ParticleSystem {
         E = Math.min(1, E + flash * 0.85);
       }
       L *= 1 + 0.5 * E;
-      if (divMask > 0.005) L *= 1 - 0.35 * divMask;
       let f = (L - 0.05) / 1.5; f = f < 0 ? 0 : f > 1 ? 1 : f;
       let gl = Math.pow(f, 0.85) * 8.99 + E * 1.5 + (ch > 0.005 ? ch * (1.6 + 2.6 * hs) : 0);
       if (gl > 8.99) gl = 8.99;
       let al = (L - 0.03) / 0.19; al = al < 0 ? 0 : al > 1 ? 1 : al; al = al * al * (3 - 2 * al);
-      const white = Math.min(1, Math.max(E * 1.35, flash)) * (1 - divMask);
-      let rr = Dr[gi] * inv + (1 - Dr[gi] * inv) * white;
-      let gg = Dg[gi] * inv + (1 - Dg[gi] * inv) * white;
-      let bb = Db[gi] * inv + (1 - Db[gi] * inv) * white;
-      if (divMask > 0.005) {
-        // franja divisoria del mismo tono oscuro que el fondo (#121315) sin eliminar partículas físicas
-        rr += (bgR - rr) * divMask;
-        gg += (bgG - gg) * divMask;
-        bb += (bgB - bb) * divMask;
-      }
-      out[o] = rr; out[o + 1] = gg; out[o + 2] = bb;
+      const white = Math.min(1, Math.max(E * 1.35, flash));
+      out[o] = Dr[gi] * inv + (1 - Dr[gi] * inv) * white;
+      out[o + 1] = Dg[gi] * inv + (1 - Dg[gi] * inv) * white;
+      out[o + 2] = Db[gi] * inv + (1 - Db[gi] * inv) * white;
       out[o + 3] = Math.floor(gl) + al * 0.99;
     }
     this.gridTex.needsUpdate = true;

@@ -145,6 +145,7 @@ function start(projects, canvas, gl2, FONT) {
   const detailEl = $('#detail'), detailHint = $('#detail-hint');
   const previewEl = $('#preview-title'), ptTitle = previewEl.querySelector('.pt-title'), ptConcept = previewEl.querySelector('.pt-concept');
   const heroSub = $('#hero-sub'), scrollHint = $('#scroll-hint');
+  let scrollHintLabel = 'SCROLL ↓', scrollHintFade = 1;
 
   const isScrollLocked = () => state === STATE.DETAIL_RECT || bhMode !== 'idle' || performance.now() < scrollLockUntil;
 
@@ -757,7 +758,7 @@ function start(projects, canvas, gl2, FONT) {
       pusher,
       ringActive: RING_STATES.has(state),
       charge: RING_STATES.has(state) ? chargeSm : 0,
-      conqSeg: hoveredSegmentId, conqP,
+      conqSeg: hoveredSegmentId, conqP, conqRawP: dwellProgress,
       isDetail: state === STATE.DETAIL_RECT,
       curInsideRect, curWasInsideRect: cursorWasInsideRect,
     });
@@ -804,7 +805,18 @@ function start(projects, canvas, gl2, FONT) {
     // --- DOM ---
     const heroDomMul = bhDomCaptured ? bhDomAlpha : 1;
     heroSub.style.opacity = String((1 - smooth(0.04, 0.2, scrollP)) * heroDomMul);
-    scrollHint.style.opacity = String((1 - smooth(0.0, 0.08, scrollP)) * heroDomMul);
+    const targetHint = state === STATE.HERO_TEXT ? 'SCROLL ↓' : (state === STATE.ABOUT_DIVIDER ? 'SCROLL ↑' : 'SCROLL ↑↓');
+    if (targetHint !== scrollHintLabel) {
+      scrollHintFade = Math.max(0, scrollHintFade - dt / 0.09);
+      if (scrollHintFade <= 0.001) {
+        scrollHintLabel = targetHint;
+        scrollHint.textContent = scrollHintLabel;
+      }
+    } else if (scrollHintFade < 1) {
+      scrollHintFade = Math.min(1, scrollHintFade + dt / 0.14);
+    }
+    const detailHintHide = 1 - smooth(0.0, 0.35, detailP);
+    scrollHint.style.opacity = String((state === STATE.HERO_TEXT ? heroDomMul : 1) * detailHintHide * scrollHintFade);
     if (previewId >= 0) {
       const es = entryScale[previewId];
       // si la compresión estrecha la cavidad interior (p > 0.30), atenúa y reduce el texto para evitar cualquier cruce
