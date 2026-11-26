@@ -3,6 +3,7 @@ import * as THREE from 'three';
 
 const SAMPLE_INTERVAL = 1 / 7;
 const FB_W = 512, FB_H = 288;
+const LOCAL_W = 24, LOCAL_H = 14;
 
 /* ---------- utilidades de color (sin THREE.Color para evitar conversiones de espacio) ---------- */
 function hexToRgb(hex) {
@@ -112,6 +113,10 @@ export class VideoManager {
     this.sCanvas = document.createElement('canvas');
     this.sCanvas.width = this.sCanvas.height = 8;
     this.sCtx = this.sCanvas.getContext('2d', { willReadFrequently: true });
+    this.lCanvas = document.createElement('canvas');
+    this.lCanvas.width = LOCAL_W; this.lCanvas.height = LOCAL_H;
+    this.lCtx = this.lCanvas.getContext('2d', { willReadFrequently: true });
+    this.lastLocal = 0;
     this.lastSample = 0;
     this.lastFb = 0;
     this.items = projects.map((p, i) => this._createItem(p, i));
@@ -127,7 +132,10 @@ export class VideoManager {
       texture: fb.texture, canvas: fb.canvas, video: null, usingVideo: false,
       targets: derived.map(c => c.slice()), colors: derived.map(c => c.slice()),
       display: toDisplay(base),
+      localT: new Float32Array(LOCAL_W * LOCAL_H * 3), localS: new Float32Array(LOCAL_W * LOCAL_H * 3),
     };
+    const d0 = item.display;
+    for (let p = 0; p < LOCAL_W * LOCAL_H; p++) { item.localT[p * 3] = item.localS[p * 3] = d0[0]; item.localT[p * 3 + 1] = item.localS[p * 3 + 1] = d0[1]; item.localT[p * 3 + 2] = item.localS[p * 3 + 2] = d0[2]; }
     if (project.video) {
       const v = document.createElement('video');
       v.muted = true; v.loop = true; v.playsInline = true; v.preload = 'auto';
@@ -156,7 +164,29 @@ export class VideoManager {
   restart(i) { const it = this.items[i]; if (it && it.usingVideo) { try { it.video.currentTime = 0; } catch (e) { /* noop */ } } }
 
   /** @param needed Set de índices cuyo frame se usa ahora mismo (para limitar subidas de textura) */
-  update(t, dt, needed) {
+  /** Rejilla 24×14 de color local del vídeo (suavizada) para colorear el marco perimetral del rectángulo. */
+  getLocal(i) { return this.items[i].localS; }
+
+  _sampleLocal(item) {
+    const src = item.usingVideo ? item.video : item.canvas;
+    let data;
+    try { this.lCtx.drawImage(src, 0, 0, LOCAL_W, LOCAL_H); data = this.lCtx.getImageData(0, 0, LOCAL_W, LOCAL_H).data; } catch (e) { data = null; }
+    for (let p = 0; p < LOCAL_W * LOCAL_H; p++) {
+      let rgb = item.display;
+      if (data && Math.max(data[p * 4], data[p * 4 + 1], data[p * 4 + 2]) > 28) {
+        const [h, s, l] = rgbToHsl([data[p * 4] / 255, data[p * 4 + 1] / 255, data[p * 4 + 2] / 255]);
+        rgb = hslToRgb([h, Math.min(s * 1.05, 0.85), Math.min(Math.max(l, 0.42), 0.8)]);
+      }
+      item.localT[p * 3] = rgb[0]; item.localT[p * 3 + 1] = rgb[1]; item.localT[p * 3 + 2] = rgb[2];
+    }
+  }
+
+  update(t, dt, needed, localId = -1) {
+    if (localId >= 0 && t - this.lastLocal > 0.11) { this.lastLocal = t; this._sampleLocal(this.items[localId]); }
+    if (localId >= 0) {
+      const it = this.items[localId], k = 1 - Math.exp(-dt * 8);
+      for (let q = 0; q < it.localS.length; q++) it.localS[q] += (it.localT[q] - it.localS[q]) * k;
+    }
     // respaldo procedural: 30 fps solo si se necesita
     if (t - this.lastFb > 1 / 30) {
       this.lastFb = t;

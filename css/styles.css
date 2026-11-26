@@ -49,7 +49,10 @@ body {
   will-change: transform, opacity;
 }
 #preview-title .pt-title { font-size: clamp(12px, 1.2vw, 17px); letter-spacing: .24em; font-weight: 500; color: var(--fg); }
-#preview-title .pt-hint { font-size: 10px; letter-spacing: .25em; color: var(--fg2); }
+#preview-title .pt-concept {
+  font-size: 12px; line-height: 1.5; color: #D6D6D6; letter-spacing: .01em;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
 
 /* ---------- DETAIL ---------- */
 #detail-hint {

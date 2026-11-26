@@ -1,7 +1,7 @@
 // main.js — orquestador: máquina de estados, scroll, hit-testing del aro, UI y bucle de render.
 import * as THREE from 'three';
 import { QUAD_VS, BG_FS, BOX_FS, createGlyphAtlas } from './shaders.js';
-import { ParticleSystem, centerAngle, boundaryAngle, segmentAt } from './particles.js';
+import { PHYSICS_CONFIG, ParticleSystem, centerAngle, boundaryAngle, segmentAt } from './particles.js';
 import { VideoManager } from './videoManager.js';
 
 /* ===================== CONFIGURACIÓN EDITABLE ===================== */
@@ -11,8 +11,12 @@ const CLIP_LEN = 3.5, CROSSFADE = 0.8;       // clips del hero
 const HERO_EXIT = 0.18, HERO_ENTER = 0.12;   // umbral de scroll (fracción de viewport)
 const ABOUT_ENTER = 1.40, ABOUT_EXIT = 1.30;
 const JUNCTION_MARGIN = 0.10;                // 10 % del arco junto a cada frontera
-const PREVIEW_OPEN_S = 0.5, DETAIL_OPEN_S = 0.55, SCROLL_COOLDOWN_MS = 650;
-const TINT_MAX = 0.07, TINT_RATE = 3.7;      // ≈ 800 ms hasta ~95 %
+const PREVIEW_OPEN_S = 0.5, DETAIL_OPEN_S = 0.55, SCROLL_COOLDOWN_MS = 650, VIDEO_OPEN_S = 0.42;
+const BG_SWITCH_S = 0.6;                     // crossfade del fondo al cambiar de segmento enfocado
+const TINT_MAX = 0.07, TINT_RATE = 3.7;      // 6–8 %, ≈ 800 ms
+const PREVIEW_R = 0.42;                      // R_preview / R_main (0.40–0.44)
+const BG_RING_LEVEL = 0.40;                  // visibilidad del fondo en Sección 2 respecto al Hero (35–45 %)
+const MAG_RADIUS = 120;                      // px, lupa micro-ASCII
 
 export const STATE = Object.freeze({
   HERO_TEXT: 'HERO_TEXT', RING_IDLE: 'RING_IDLE', RING_JUNCTION: 'RING_JUNCTION',
@@ -21,16 +25,15 @@ export const STATE = Object.freeze({
 const RING_STATES = new Set([STATE.RING_IDLE, STATE.RING_JUNCTION, STATE.RING_PREVIEW]);
 
 const $ = (s) => document.querySelector(s);
-const clamp01 = (x) => Math.min(1, Math.max(0, x));
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const clamp01 = (x) => clamp(x, 0, 1);
 const lerp = (a, b, t) => a + (b - a) * t;
 const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
 const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
 const easeInOutCubic = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 const expK = (rate, dt) => 1 - Math.exp(-rate * dt);
 
-function fatal(msg) {
-  const el = $('#fatal'); el.textContent = msg; el.hidden = false;
-}
+function fatal(msg) { const el = $('#fatal'); el.textContent = msg; el.hidden = false; }
 
 async function boot() {
   let projects;
@@ -45,10 +48,8 @@ async function boot() {
   const canvas = $('#gl');
   const gl2 = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' });
   if (!gl2) { fatal('Este portafolio necesita WebGL2.'); return; }
-
   const FONT = '"JetBrains Mono","Space Mono",monospace';
-  try { await Promise.race([Promise.all([document.fonts.load(`800 64px ${FONT}`), document.fonts.load(`700 32px ${FONT}`)]), new Promise(r => setTimeout(r, 2500))]); } catch (e) { /* usa fallback */ }
-
+  try { await Promise.race([Promise.all([document.fonts.load(`800 64px ${FONT}`), document.fonts.load(`700 32px ${FONT}`)]), new Promise(r => setTimeout(r, 2500))]); } catch (e) { /* fallback */ }
   start(projects, canvas, gl2, FONT);
 }
 
@@ -61,7 +62,7 @@ function start(projects, canvas, gl2, FONT) {
 
   const scene = new THREE.Scene();
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-  const atlas = createGlyphAtlas(THREE);
+  const atlas = createGlyphAtlas(THREE, PHYSICS_CONFIG.charset);
   const videos = new VideoManager(projects);
 
   // --- fondo (filtro ASCII + tinte + grano) ---
@@ -78,47 +79,49 @@ function start(projects, canvas, gl2, FONT) {
   bgMesh.frustumCulled = false; bgMesh.renderOrder = 0;
   scene.add(bgMesh);
 
-  // --- caja de vídeo (arito / rectángulo) con mosaico y lupa ASCII ---
+  // --- caja de vídeo (arito / rectángulo) ---
   const boxMat = new THREE.ShaderMaterial({
     vertexShader: QUAD_VS, fragmentShader: BOX_FS, transparent: true, depthTest: false, depthWrite: false,
     uniforms: {
       tVideo: { value: videos.getTexture(0) }, tAtlas: { value: atlas },
       uCenter: { value: new THREE.Vector2() }, uHalf: { value: new THREE.Vector2(1, 1) }, uCorner: { value: 0 },
       uSoft: { value: 24 }, uMosaic: { value: 1 }, uVAspect: { value: 16 / 9 },
-      uMagPos: { value: new THREE.Vector2() }, uMagR: { value: 0 }, uDpr: { value: dpr }, uTime: { value: 0 }, uAlpha: { value: 0 },
+      uMagPos: { value: new THREE.Vector2() }, uMagR: { value: 0 }, uPulse: { value: 0 },
+      uDpr: { value: dpr }, uTime: { value: 0 }, uAlpha: { value: 0 },
     },
   });
   const boxMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), boxMat);
   boxMesh.frustumCulled = false; boxMesh.renderOrder = 1; boxMesh.visible = false;
   scene.add(boxMesh);
 
-  // --- partículas ---
+  // --- partículas (pool fijo y conservado) ---
   const cores = navigator.hardwareConcurrency || 4;
-  const startCount = cores >= 12 ? 22000 : cores >= 8 ? 18000 : 14000;
-  const ps = new ParticleSystem({ atlas, N, count: startCount, maxCount: 25000 });
-  ps.points.renderOrder = 3;
-  scene.add(ps.points);
+  const pc = PHYSICS_CONFIG.particleCount;
+  const ps = new ParticleSystem({ atlas, N, count: cores >= 8 ? pc.high : cores >= 4 ? pc.mid : pc.low });
+  scene.add(ps.mesh);
 
   /* ===================== ESTADO ===================== */
   let W = 1, H = 1, R = 300;
-  let state = STATE.HERO_TEXT;
-  let heroOver = false, aboutOver = false;
-  let scrollP = 0;
+  let state = STATE.HERO_TEXT, booted = false;
+  let heroOver = false, aboutOver = false, scrollP = 0;
   let previewId = -1, previewWanted = false, previewP = 0, detailP = 0, detailWanted = false, mosaicT = 1;
-  let junction = { idx: -1 };
+  const junction = { idx: -1 };
   let scrollLockUntil = 0;
   let tintAmt = 0; const tintCol = [...BASE_BG];
-  let magX = 0, magY = 0, magR = 0;
-  const cur = { x: 0, y: 0, sx: 0, sy: 0, vx: 0, vy: 0, speed: 0, valid: false, enabled: false };
+  let magX = 0, magY = 0, magR = 0, pulse = 0;
+  let focusId = -1, bgFrom = 0, bgTo = 0, bgT = 1, lastShown = 0;
+  const cur = { x: 0, y: 0, px: 0, py: 0, sx: 0, sy: 0, vx: 0, vy: 0, speed: 0, valid: false };
   let accDx = 0, accDy = 0, lastClientX = null, lastClientY = null;
+  const cavityCache = new Map();
 
   const bodyEl = document.body;
   const detailEl = $('#detail'), detailHint = $('#detail-hint');
-  const previewEl = $('#preview-title');
+  const previewEl = $('#preview-title'), ptTitle = previewEl.querySelector('.pt-title'), ptConcept = previewEl.querySelector('.pt-concept');
   const heroSub = $('#hero-sub'), scrollHint = $('#scroll-hint');
 
   function setState(s) {
     if (s === state) return;
+    if (booted && ((state === STATE.HERO_TEXT) !== (s === STATE.HERO_TEXT))) ps.burst();   // Hero ↔ Aro: expansión + colapso violento
     state = s; bodyEl.dataset.state = s;
   }
 
@@ -129,38 +132,32 @@ function start(projects, canvas, gl2, FONT) {
     bgMat.uniforms.uRes.value.set(W, H);
     ps.resize(W, H, dpr);
     ps.buildTextField('ALYSAURIO', FONT);
+    cavityCache.clear(); previewEl.dataset.id = '';
     onScroll();
   }
   let rzT = 0;
   window.addEventListener('resize', () => { clearTimeout(rzT); rzT = setTimeout(resize, 120); });
-
   function onScroll() { scrollP = window.scrollY / Math.max(1, window.innerHeight); }
   window.addEventListener('scroll', onScroll, { passive: true });
 
   /* ===================== INTERACCIÓN ===================== */
   window.addEventListener('pointermove', (e) => {
-    if (lastClientX !== null) { accDx += e.clientX - lastClientX; accDy += e.clientY - lastClientY; }
-    lastClientX = e.clientX; lastClientY = e.clientY;
-    cur.sx = e.clientX; cur.sy = e.clientY; cur.valid = true;
-    cur.x = e.clientX - W / 2; cur.y = H / 2 - e.clientY;
+    cur.x = e.clientX - W / 2; cur.y = H / 2 - e.clientY; cur.sx = e.clientX; cur.sy = e.clientY;
+    if (!cur.valid || lastClientX === null) { cur.px = cur.x; cur.py = cur.y; }
+    else { accDx += e.clientX - lastClientX; accDy += e.clientY - lastClientY; }
+    lastClientX = e.clientX; lastClientY = e.clientY; cur.valid = true;
   }, { passive: true });
-  document.addEventListener('pointerleave', () => { cur.valid = false; });
-  document.documentElement.addEventListener('mouseleave', () => { cur.valid = false; });
+  const leave = () => { cur.valid = false; lastClientX = null; };
+  document.documentElement.addEventListener('mouseleave', leave);
 
-  function boxGeom() {
-    // caja de detalle: 16:9 desplazada hacia la derecha
+  /* --- geometría paramétrica --- */
+  function aritoGeom(id, e) {            // centro EXACTO sobre el punto medio del segmento en la circunferencia media
+    const a = centerAngle(id, N);
+    return { x: Math.cos(a) * R, y: Math.sin(a) * R, r: PREVIEW_R * R * e };
+  }
+  function boxGeom() {                   // rectángulo de detalle 16:9, desplazado a la derecha
     const hh = Math.min(H * 0.36, W * 0.30 * 9 / 16), hw = hh * 16 / 9;
     return { x: W * 0.44 - hw, y: 0, hw, hh, cr: 26 };
-  }
-  function aritoGeom(id, e) {
-    const a = centerAngle(id, N), rp = 0.62 * R * e;
-    return { x: Math.cos(a) * R * 0.28, y: Math.sin(a) * R * 0.28, r: rp };
-  }
-  function cursorInsideBox() {
-    const b = currentBox(); if (!b) return false;
-    const qx = Math.abs(cur.x - b.x) - b.hw + b.cr, qy = Math.abs(cur.y - b.y) - b.hh + b.cr;
-    const sd = Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - b.cr;
-    return sd < 0;
   }
   function currentBox() {
     if (previewId < 0) return null;
@@ -169,6 +166,44 @@ function start(projects, canvas, gl2, FONT) {
     const hw = lerp(a.r, t.hw, d), hh = lerp(a.r, t.hh, d);
     if (hw < 2 && d < 0.01) return null;
     return { x: lerp(a.x, t.x, d), y: lerp(a.y, t.y, d), hw, hh, cr: Math.min(lerp(a.r, t.cr, d), hw, hh) };
+  }
+  function cursorInsideBox() {
+    const b = currentBox(); if (!b) return false;
+    const qx = Math.abs(cur.x - b.x) - b.hw + b.cr, qy = Math.abs(cur.y - b.y) - b.hh + b.cr;
+    return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - b.cr < 0;
+  }
+  function cursorInArito() {
+    if (previewId < 0) return false;
+    const a = aritoGeom(previewId, easeOutCubic(previewP));
+    return Math.hypot(cur.x - a.x, cur.y - a.y) < a.r;
+  }
+
+  /* --- texto del «arito» dentro de la cavidad libre del aro (nunca toca el aro ni el arito) --- */
+  function cavityLayout(id) {
+    if (cavityCache.has(id)) return cavityCache.get(id);
+    const a = centerAngle(id, N), dx = Math.cos(a), dy = Math.sin(a);
+    const ax = dx * R, ay = dy * R, rp = PREVIEW_R * R;
+    const fsT = clamp(R * 0.085, 13, 26), fsC = clamp(R * 0.04, 10.5, 14);
+    const title = projects[id].title || '', concept = projects[id].shortConcept || '';
+    const inner = R - 13 - 16;
+    let best = null;
+    for (let wb = R * 1.3; wb >= R * 0.45 && !best; wb -= R * 0.04) {
+      if (title.length * fsT * 0.86 > wb) continue;
+      const lines = Math.min(3, Math.max(1, Math.ceil(concept.length * fsC * 0.62 / wb)));
+      const hb = fsT * 1.4 + 8 + lines * fsC * 1.55;
+      for (let s = 0; s <= R * 0.7 && !best; s += R * 0.03) {
+        const cx = -dx * s, cy = -dy * s;
+        let ok = true;
+        for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
+          const x = cx + sx * wb / 2, y = cy + sy * hb / 2;
+          if (Math.hypot(x, y) > inner || Math.hypot(x - ax, y - ay) < rp + 7 + 16) ok = false;
+        }
+        if (ok) best = { cx, cy, w: wb, fsT, fsC };
+      }
+    }
+    if (!best) best = { cx: -dx * R * 0.35, cy: -dy * R * 0.35, w: R * 0.45, fsT, fsC };
+    cavityCache.set(id, best);
+    return best;
   }
 
   function openDetail() {
@@ -179,8 +214,8 @@ function start(projects, canvas, gl2, FONT) {
     const wrap = $('#d-repo-wrap'); wrap.textContent = '';
     if (p.repoUrl && p.repoUrl.trim()) {
       const a = document.createElement('a');
-      a.id = 'd-repo'; a.href = p.repoUrl; a.target = '_blank'; a.rel = 'noopener noreferrer';
-      a.textContent = 'REPOSITORIO ↗'; wrap.appendChild(a);
+      a.id = 'd-repo'; a.href = p.repoUrl; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = 'REPOSITORIO ↗';
+      wrap.appendChild(a);
     } else {
       const s = document.createElement('span'); s.className = 'pending'; s.textContent = 'REPOSITORIO — PRÓXIMAMENTE'; wrap.appendChild(s);
     }
@@ -198,23 +233,15 @@ function start(projects, canvas, gl2, FONT) {
 
   window.addEventListener('click', (e) => {
     if (state === STATE.DETAIL_RECT) {
-      if (e.target.closest && e.target.closest('#d-repo')) return;      // el enlace del repo no cierra
+      if (e.target.closest && e.target.closest('#d-repo')) return;
       if (!cursorInsideBox()) closeDetail();
       return;
     }
-    if (state === STATE.RING_PREVIEW && previewId >= 0 && previewP > 0.35) {
-      const a = aritoGeom(previewId, easeOutCubic(previewP));
-      if (Math.hypot(cur.x - a.x, cur.y - a.y) < a.r) openDetail();
-    }
+    if (state === STATE.RING_PREVIEW && previewId >= 0 && previewP > 0.35 && cursorInArito()) openDetail();
   });
-
   window.addEventListener('wheel', (e) => {
-    if (state === STATE.DETAIL_RECT) {
-      e.preventDefault();
-      if (Math.abs(e.deltaY) > 0) closeDetail();
-      return;
-    }
-    if (performance.now() < scrollLockUntil) e.preventDefault();          // absorbe inercia del ratón/trackpad
+    if (state === STATE.DETAIL_RECT) { e.preventDefault(); if (Math.abs(e.deltaY) > 0) closeDetail(); return; }
+    if (performance.now() < scrollLockUntil) e.preventDefault();
   }, { passive: false });
   window.addEventListener('touchmove', (e) => { if (state === STATE.DETAIL_RECT || performance.now() < scrollLockUntil) e.preventDefault(); }, { passive: false });
   window.addEventListener('keydown', (e) => {
@@ -222,8 +249,7 @@ function start(projects, canvas, gl2, FONT) {
     if (state === STATE.DETAIL_RECT && [' ', 'PageDown', 'PageUp', 'ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) { e.preventDefault(); closeDetail(); }
   });
 
-  // copiar correo
-  const emailText = $('#email-text'); emailText.textContent = CONTACT_EMAIL;
+  $('#email-text').textContent = CONTACT_EMAIL;
   const status = $('#copy-status'); let stT = 0;
   $('#copy-email').addEventListener('click', async () => {
     let ok = false;
@@ -237,7 +263,7 @@ function start(projects, canvas, gl2, FONT) {
 
   /* ===================== MÁQUINA DE ESTADOS ===================== */
   function updateScrollState() {
-    if (state === STATE.DETAIL_RECT) return;               // bloqueado mientras el detalle está activo
+    if (state === STATE.DETAIL_RECT) return;
     const p = scrollP;
     if (!heroOver && p > HERO_EXIT) heroOver = true; else if (heroOver && p < HERO_ENTER) heroOver = false;
     if (!aboutOver && p > ABOUT_ENTER) aboutOver = true; else if (aboutOver && p < ABOUT_EXIT) aboutOver = false;
@@ -251,12 +277,10 @@ function start(projects, canvas, gl2, FONT) {
     let want = { type: 'none' };
     if (cur.valid) {
       const x = cur.x, y = cur.y, r = Math.hypot(x, y);
-      // 1) dentro del «arito» abierto (o abriéndose)
       if (previewId >= 0 && previewWanted && previewP > 0.02) {
-        const a = aritoGeom(previewId, Math.max(easeOutCubic(previewP), 0.25));
+        const a = aritoGeom(previewId, Math.max(easeOutCubic(previewP), 0.3));
         if (Math.hypot(x - a.x, y - a.y) < a.r + 10) want = { type: 'preview', id: previewId };
       }
-      // 2) sobre el aro
       if (want.type === 'none' && Math.abs(r - R) < 0.14 * R + 13) {
         const { k, f } = segmentAt(Math.atan2(y, x), N);
         if (f < JUNCTION_MARGIN || f > 1 - JUNCTION_MARGIN) {
@@ -270,31 +294,20 @@ function start(projects, canvas, gl2, FONT) {
       if (previewId !== want.id) { if (previewP < 0.02) previewP = 0; previewId = want.id; mosaicT = 0; }
       else if (!previewWanted) mosaicT = 0;
       previewWanted = true; junction.idx = -1; setState(STATE.RING_PREVIEW);
-    } else if (want.type === 'junction') {
-      previewWanted = false; junction.idx = want.idx; setState(STATE.RING_JUNCTION);
-    } else { previewWanted = false; junction.idx = -1; setState(STATE.RING_IDLE); }
+    } else if (want.type === 'junction') { previewWanted = false; junction.idx = want.idx; setState(STATE.RING_JUNCTION); }
+    else { previewWanted = false; junction.idx = -1; setState(STATE.RING_IDLE); }
   }
 
   /* ===================== BUCLE ===================== */
-  let last = performance.now(), t = 0;
-  let frameAcc = 0, frameN = 0;
+  let last = performance.now(), t = 0, restartedTick = -1;
   const needed = new Set();
-  let restartedTick = -1;
   const colorsRef = Array.from({ length: N }, () => [1, 1, 1]);
 
   function frame(now) {
     requestAnimationFrame(frame);
-    const rawDt = (now - last) / 1000; last = now;
-    const dt = Math.min(rawDt, 1 / 30); t += dt;
+    const dt = Math.min((now - last) / 1000, 1 / 30); last = now; t += dt;
 
-    // rendimiento adaptativo (reduce partículas si baja de ~48 fps)
-    frameAcc += rawDt; frameN++;
-    if (frameN >= 90) {
-      if (frameAcc / frameN > 0.0215 && ps.count > 12000) ps.setCount(Math.max(12000, ps.count * 0.85));
-      frameAcc = 0; frameN = 0;
-    }
-
-    // velocidad del cursor (px/s, suavizada; decae si no hay movimiento)
+    // velocidad suavizada del cursor (px/s)
     const kv = expK(25, dt);
     cur.vx += (accDx / dt - cur.vx) * kv; cur.vy += (-accDy / dt - cur.vy) * kv;
     accDx = accDy = 0;
@@ -303,98 +316,113 @@ function start(projects, canvas, gl2, FONT) {
 
     updateScrollState();
     ringHitTest();
-    bodyEl.style.cursor = state === STATE.RING_PREVIEW && cur.valid && previewP > 0.35 && (() => { const a = aritoGeom(previewId, easeOutCubic(previewP)); return Math.hypot(cur.x - a.x, cur.y - a.y) < a.r; })() ? 'pointer' : '';
+    bodyEl.style.cursor = state === STATE.RING_PREVIEW && cur.valid && previewP > 0.35 && cursorInArito() ? 'pointer' : '';
 
-    // tweens interrumpibles
     previewP = clamp01(previewP + (previewWanted ? dt / PREVIEW_OPEN_S : -dt / 0.35));
     detailP = clamp01(detailP + (detailWanted ? dt / DETAIL_OPEN_S : -dt / DETAIL_OPEN_S));
-    mosaicT = clamp01(mosaicT + dt / 0.6);
-
+    mosaicT = clamp01(mosaicT + dt / VIDEO_OPEN_S);
     const e = easeOutCubic(previewP), d = easeInOutCubic(detailP);
 
-    // --- vídeo y paleta ---
-    needed.clear();
-    const bgAmt = 1 - smooth(0.14, 0.5, scrollP);
-    const bi = Math.floor(t / CLIP_LEN) % N, local = t % CLIP_LEN;
+    // --- fondo reactivo por sección ---
+    const bgAmt = (1 - (1 - BG_RING_LEVEL) * smooth(0.14, 0.5, scrollP)) * (1 - smooth(1.15, 1.55, scrollP));
+    const bi = Math.floor(t / CLIP_LEN) % N, bj = (bi + 1) % N, local = t % CLIP_LEN;
     const cross = N > 1 ? smooth(CLIP_LEN - CROSSFADE, CLIP_LEN, local) : 0;
-    const bj = (bi + 1) % N;
-    if (bgAmt > 0.01) { needed.add(bi); needed.add(bj); }
-    if (previewId >= 0 && (previewP > 0 || detailP > 0)) needed.add(previewId);
-    videos.update(t, dt, needed);
-    for (let k = 0; k < N; k++) { const c = videos.getColor(k); colorsRef[k] = c; }
-    const clipTick = Math.floor(t / CLIP_LEN);
-    if (bgAmt > 0.01 && N > 1 && local >= CLIP_LEN - CROSSFADE && restartedTick !== clipTick) { restartedTick = clipTick; videos.restart(bj); }
+    let bgA, bgB, bgMix;
+    if (state === STATE.HERO_TEXT) {
+      bgA = bi; bgB = bj; bgMix = cross; lastShown = cross > 0.5 ? bj : bi; bgFrom = bgTo = lastShown; bgT = 1; focusId = -1;
+      const tick = Math.floor(t / CLIP_LEN);
+      if (N > 1 && local >= CLIP_LEN - CROSSFADE && restartedTick !== tick) { restartedTick = tick; videos.restart(bj); }
+    } else {
+      if (focusId < 0) focusId = lastShown;
+      if (previewWanted && previewId >= 0) focusId = previewId;         // último proyecto apuntado se mantiene al salir a zona neutra
+      if (focusId !== bgTo) { bgFrom = bgTo; bgTo = focusId; bgT = 0; }
+      bgT = clamp01(bgT + dt / BG_SWITCH_S);
+      bgA = bgFrom; bgB = bgTo; bgMix = easeInOutCubic(bgT);
+    }
 
-    // --- objetivos para partículas ---
+    needed.clear();
+    if (bgAmt > 0.01) { needed.add(bgA); needed.add(bgB); }
+    const cb = currentBox();
+    const boxOn = !!cb && (previewP > 0 || detailP > 0);
+    if (boxOn) needed.add(previewId);
+    videos.update(t, dt, needed, boxOn ? previewId : -1);
+    for (let k = 0; k < N; k++) colorsRef[k] = videos.getColor(k);
+
+    // --- objetivos para el motor de partículas ---
     const full = Math.PI / N * 0.992;
     const ringOn = RING_STATES.has(state) || state === STATE.DETAIL_RECT ? 1 : 0;
-    const ap = new Array(N);
-    for (let k = 0; k < N; k++) ap[k] = full * ringOn * (1 - (k === previewId ? e : 0)) * (1 - d);
+    const ap = new Array(N), gam = new Array(N);
+    const rpNow = PREVIEW_R * R * e;
+    const gamOpen = 2 * Math.asin(Math.min(1, rpNow / (2 * R))) * 0.92;      // el arito sustituye el tramo central; las «Y» quedan unidas
+    for (let k = 0; k < N; k++) { ap[k] = full * ringOn * (1 - d); gam[k] = k === previewId ? gamOpen : 0; }
 
     let box = null;
-    const cb = currentBox();
-    if (cb && (previewP > 0 || detailP > 0)) {
-      box = { x: cb.x, y: cb.y, hw: cb.hw, hh: cb.hh, cr: cb.cr, rb: lerp(6, 7, d), color: colorsRef[previewId] };
-    }
+    if (boxOn) box = { x: cb.x, y: cb.y, hw: cb.hw, hh: cb.hh, cr: cb.cr, rb: lerp(7, 18, d), off: lerp(0, 18, d), d, local: videos.getLocal(previewId) };
 
     const jn = { x: 0, y: 0, r: 0 };
     if (state === STATE.RING_JUNCTION && junction.idx >= 0) {
       const a = boundaryAngle(junction.idx, N), bx = Math.cos(a) * R, by = Math.sin(a) * R;
-      const ox = Math.max(-14, Math.min(14, (cur.x - bx) * 0.35)) + Math.sin(t * 5.3) * 3;
-      const oy = Math.max(-14, Math.min(14, (cur.y - by) * 0.35)) + Math.cos(t * 4.7) * 3;
-      jn.x = bx + ox; jn.y = by + oy; jn.r = 28;
+      jn.x = bx + clamp((cur.x - bx) * 0.35, -14, 14) + Math.sin(t * 5.3) * 3;
+      jn.y = by + clamp((cur.y - by) * 0.35, -14, 14) + Math.cos(t * 4.7) * 3;
+      jn.r = 28;
     }
 
-    cur.enabled = RING_STATES.has(state);
     ps.setTargets({
-      mode: state === STATE.HERO_TEXT ? 0 : 1, R, rb: 13, ap, colors: colorsRef, box, junction: jn,
-      lineL: state === STATE.ABOUT_DIVIDER ? H * 0.46 : 0, lrb: 13, enabled: cur.enabled,
+      mode: state === STATE.HERO_TEXT ? 0 : 1, R, rb: 13, ap, gam, colors: colorsRef, box, junction: jn,
+      lineL: state === STATE.ABOUT_DIVIDER ? H * 0.46 : 0, lrb: 13, enabled: RING_STATES.has(state),
     });
     ps.update(dt, t, cur);
+    cur.px = cur.x; cur.py = cur.y;
+    booted = true;
 
-    // --- fondo + tinte ambiental ---
+    // --- uniformes de fondo + tinte ---
     const tintTarget = (state === STATE.RING_PREVIEW || state === STATE.DETAIL_RECT) && previewId >= 0 ? 1 : 0;
     tintAmt += (tintTarget - tintAmt) * expK(TINT_RATE, dt);
-    if (previewId >= 0) { const tc = colorsRef[previewId]; const kc = expK(TINT_RATE, dt); for (let c = 0; c < 3; c++) tintCol[c] += (tc[c] - tintCol[c]) * kc; }
+    if (previewId >= 0) { const tc = colorsRef[previewId], kc = expK(TINT_RATE, dt); for (let c = 0; c < 3; c++) tintCol[c] += (tc[c] - tintCol[c]) * kc; }
     const bu = bgMat.uniforms;
-    bu.tA.value = videos.getTexture(bi); bu.tB.value = videos.getTexture(bj);
-    bu.uMix.value = cross; bu.uTime.value = t; bu.uBgAmt.value = bgAmt;
-    bu.uSimplify.value = 1 + 1.6 * smooth(0.1, 0.4, scrollP);
+    bu.tA.value = videos.getTexture(bgA); bu.tB.value = videos.getTexture(bgB);
+    bu.uMix.value = bgMix; bu.uTime.value = t; bu.uBgAmt.value = bgAmt;
+    bu.uSimplify.value = 1 + 0.5 * smooth(0.1, 0.45, scrollP);
     bu.uTint.value.set(tintCol[0], tintCol[1], tintCol[2]);
     bu.uTintAmt.value = tintAmt * TINT_MAX;
 
     // --- caja de vídeo ---
-    if (box) {
+    if (boxOn) {
       boxMesh.visible = true;
       const u = boxMat.uniforms;
       u.tVideo.value = videos.getTexture(previewId);
-      u.uCenter.value.set(W / 2 + box.x, H / 2 + box.y);
-      u.uHalf.value.set(Math.max(box.hw, 1), Math.max(box.hh, 1));
-      u.uCorner.value = box.cr;
-      u.uSoft.value = lerp(30, 10, d);
+      u.uCenter.value.set(W / 2 + cb.x, H / 2 + cb.y);
+      u.uHalf.value.set(Math.max(cb.hw, 1), Math.max(cb.hh, 1));
+      u.uCorner.value = cb.cr;
+      u.uSoft.value = lerp(26, 8, d);
       u.uMosaic.value = 1 - easeOutCubic(mosaicT);
       u.uAlpha.value = clamp01(previewP * 4);
       u.uTime.value = t;
-      // lupa ASCII radial con inercia: solo con el rectángulo formado y el cursor dentro
       const magOn = state === STATE.DETAIL_RECT && detailP > 0.95 && cursorInsideBox() ? 1 : 0;
       const tx = cur.sx, ty = H - cur.sy;
       if (magR < 2) { magX = tx; magY = ty; }
       const kk = expK(9, dt);
       magX += (tx - magX) * kk; magY += (ty - magY) * kk;
-      magR += ((magOn ? Math.min(150, W * 0.09) : 0) - magR) * expK(9, dt);
+      magR += ((magOn ? MAG_RADIUS : 0) - magR) * kk;
       if (magR < 0.5) magR = 0;
-      u.uMagPos.value.set(magX, magY); u.uMagR.value = magR;
+      pulse += (clamp01(cur.speed / 1400) - pulse) * expK(8, dt);
+      u.uMagPos.value.set(magX, magY); u.uMagR.value = magR; u.uPulse.value = pulse;
     } else { boxMesh.visible = false; magR = 0; }
 
     // --- DOM ---
     heroSub.style.opacity = String(1 - smooth(0.04, 0.2, scrollP));
     scrollHint.style.opacity = String(1 - smooth(0.0, 0.08, scrollP));
     if (previewId >= 0) {
-      const a = centerAngle(previewId, N);
-      const o = clamp01((e - 0.5) / 0.5) * (1 - d) * (state === STATE.DETAIL_RECT ? 0 : 1);
+      const o = clamp01((e - 0.6) / 0.4) * (1 - d) * (state === STATE.DETAIL_RECT ? 0 : 1) * (previewWanted ? 1 : 0.0);
       previewEl.style.opacity = String(o);
-      previewEl.style.transform = `translate(${W / 2 + Math.cos(a) * R * 1.0}px, ${H / 2 - Math.sin(a) * R * 1.0}px) translate(-50%,-50%)`;
-      if (previewEl.dataset.id !== String(previewId)) { previewEl.dataset.id = String(previewId); previewEl.querySelector('.pt-title').textContent = projects[previewId].title; }
+      if (previewEl.dataset.id !== String(previewId)) {
+        previewEl.dataset.id = String(previewId);
+        const L = cavityLayout(previewId);
+        ptTitle.textContent = projects[previewId].title; ptConcept.textContent = projects[previewId].shortConcept || '';
+        ptTitle.style.fontSize = L.fsT + 'px'; ptConcept.style.fontSize = L.fsC + 'px';
+        previewEl.style.width = L.w + 'px';
+        previewEl.style.transform = `translate(${W / 2 + L.cx}px, ${H / 2 - L.cy}px) translate(-50%,-50%)`;
+      }
     } else previewEl.style.opacity = '0';
 
     renderer.render(scene, camera);

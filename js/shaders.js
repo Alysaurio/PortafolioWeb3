@@ -1,34 +1,34 @@
-// shaders.js — GLSL + atlas tipográfico. Rampa ordenada por densidad de tinta.
-export const GLYPHS = ['·', ':', ';', '=', '+', 'x', '#', '%', '@'];
-export const GLYPH_COUNT = GLYPHS.length;
+// shaders.js — atlas tipográfico + GLSL: capa ASCII de grilla fija, fondo ASCII de vídeo y caja de vídeo con escáner micro-ASCII.
+export const DEFAULT_CHARSET = ['.', ':', ';', '=', '+', 'x', '#', '%', '@'];
+export const ATLAS_CELL = 48;
 
-/** Atlas horizontal (1 fila) con los glifos en blanco sobre transparente; se usa el canal alfa. */
-export function createGlyphAtlas(THREE, cell = 48) {
+/** Atlas horizontal (1 fila, un glifo por celda) en blanco sobre transparente; se usa el canal alfa. */
+export function createGlyphAtlas(THREE, charset = DEFAULT_CHARSET) {
+  const cell = ATLAS_CELL;
   const c = document.createElement('canvas');
-  c.width = cell * GLYPH_COUNT; c.height = cell;
+  c.width = cell * charset.length; c.height = cell;
   const g = c.getContext('2d');
   g.clearRect(0, 0, c.width, c.height);
-  g.fillStyle = '#fff';
-  g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.font = `700 ${Math.round(cell * 0.82)}px "JetBrains Mono","Space Mono",monospace`;
-  GLYPHS.forEach((ch, i) => g.fillText(ch, i * cell + cell / 2, cell / 2 + cell * 0.04));
+  g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.font = `700 ${Math.round(cell * 0.84)}px "JetBrains Mono","Space Mono",monospace`;
+  charset.forEach((ch, i) => g.fillText(ch, i * cell + cell / 2, cell / 2 + cell * 0.04));
   const tex = new THREE.CanvasTexture(c);
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  tex.generateMipmaps = true;
-  tex.needsUpdate = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true; tex.needsUpdate = true;
   return tex;
 }
 
 const COMMON = /* glsl */`
 uniform sampler2D tAtlas;
 const float GLYPH_N = 9.0;
-float glyphAlpha(float g, vec2 f){
-  f = clamp(f, 0.04, 0.96);
-  return texture2D(tAtlas, vec2((g + f.x) / GLYPH_N, f.y)).a;
+const float ATLAS_CELL = 48.0;
+// cellDev = tamaño de la celda en píxeles de dispositivo → LOD explícito (sin saltos de derivadas en los bordes de celda)
+float glyphAlpha(float g, vec2 f, float cellDev){
+  f = clamp(f, 0.03, 0.97);
+  float lod = max(0.0, log2(ATLAS_CELL / max(cellDev, 1.0)));
+  return textureLod(tAtlas, vec2((g + f.x) / GLYPH_N, f.y), lod).a;
 }
 float hash12(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
-// object-fit: cover de un vídeo (aspecto va) dentro de la caja (centro c, semitamaño h) — p en px CSS, y hacia arriba
 vec2 coverUV(vec2 p, vec2 c, vec2 h, float va){
   vec2 q = (p - c) / (2.0 * h) + 0.5;
   float ba = h.x / h.y;
@@ -38,37 +38,31 @@ vec2 coverUV(vec2 p, vec2 c, vec2 h, float va){
 }
 `;
 
-/* ---------------- Partículas: un punto = un glifo del atlas ---------------- */
-export const PARTICLE_VS = /* glsl */`
-attribute vec3 aColor;
-attribute float aGlyph;
-uniform vec2 uRes;
-uniform float uCell;
-uniform float uDpr;
-varying vec3 vColor;
-varying float vGlyph;
-void main(){
-  vec2 p = (floor(position.xy / uCell) + 0.5) * uCell;   // rejilla de celdas (malla ASCII densa)
-  gl_Position = vec4(p / (uRes * 0.5), 0.0, 1.0);
-  gl_PointSize = uCell * uDpr;
-  vColor = aColor; vGlyph = aGlyph;
-}`;
-
-export const PARTICLE_FS = /* glsl */`
-${COMMON}
-varying vec3 vColor;
-varying float vGlyph;
-void main(){
-  float a = glyphAlpha(vGlyph, vec2(gl_PointCoord.x, 1.0 - gl_PointCoord.y));
-  if (a < 0.05) discard;
-  gl_FragColor = vec4(vColor, min(1.0, a * 1.15));
-}`;
-
 export const QUAD_VS = /* glsl */`
 varying vec2 vUv;
 void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
-/* ---------------- Fondo: filtro ASCII/semitono de los clips + tinte ambiental + grano ---------------- */
+/* Capa ASCII de grilla fija: cada celda lee (rgb, glifo+alfa) de la textura de datos que rellena el splatting de partículas. */
+export const GRID_FS = /* glsl */`
+${COMMON}
+uniform sampler2D tGrid;
+uniform vec2 uGrid;
+uniform float uCell;
+uniform float uDpr;
+varying vec2 vUv;
+void main(){
+  vec2 frag = gl_FragCoord.xy / uDpr;
+  vec2 c = floor(frag / uCell);
+  vec4 d = texture2D(tGrid, (c + 0.5) / uGrid);
+  float g = floor(d.a);
+  float al = (d.a - g) / 0.99;
+  float ga = glyphAlpha(g, fract(frag / uCell), uCell * uDpr);
+  float a = clamp(ga * al * 1.25, 0.0, 1.0);
+  if (a < 0.03) discard;
+  gl_FragColor = vec4(d.rgb, a);
+}`;
+
+/* Fondo: filtro ASCII/semitono del vídeo (con crossfade A→B) + tinte ambiental + grano. */
 export const BG_FS = /* glsl */`
 ${COMMON}
 uniform sampler2D tA;
@@ -86,8 +80,7 @@ uniform float uVAspect;
 varying vec2 vUv;
 void main(){
   vec2 frag = gl_FragCoord.xy / uDpr;
-  vec3 base = mix(uBase, uTint, uTintAmt);
-  vec3 col = base;
+  vec3 col = mix(uBase, uTint, uTintAmt);
   if (uBgAmt > 0.003) {
     float cs = 9.0 * uSimplify;
     vec2 cc = (floor(frag / cs) + 0.5) * cs;
@@ -95,15 +88,15 @@ void main(){
     vec3 v = mix(texture2D(tA, uv).rgb, texture2D(tB, uv).rgb, uMix);
     float lum = dot(v, vec3(0.299, 0.587, 0.114));
     float g = floor(clamp(pow(lum, 0.75) * 1.25, 0.0, 1.0) * 8.99);
-    float a = glyphAlpha(g, fract(frag / cs));
+    float a = glyphAlpha(g, fract(frag / cs), cs * uDpr);
     float vig = 1.0 - 0.45 * smoothstep(0.35, 0.95, length((frag / uRes - 0.5) * vec2(1.0, 0.9)) * 1.6);
-    col += (v * 0.035 + v * a * 0.30) * uBgAmt * vig;   // baja opacidad, no compite con el título
+    col += (v * 0.035 + v * a * 0.30) * uBgAmt * vig;
   }
-  col += (hash12(gl_FragCoord.xy + fract(uTime) * 91.7) - 0.5) * 0.05;  // grano ~2.5 %
+  col += (hash12(gl_FragCoord.xy + fract(uTime) * 91.7) - 0.5) * 0.05;   // grano ~2.5 %
   gl_FragColor = vec4(col, 1.0);
 }`;
 
-/* ---------------- Caja de vídeo: arito / rectángulo + mosaico + lupa ASCII radial ---------------- */
+/* Caja de vídeo (arito / rectángulo): apertura micro-ASCII → vídeo y escáner micro-ASCII técnico radial. */
 export const BOX_FS = /* glsl */`
 ${COMMON}
 uniform sampler2D tVideo;
@@ -111,10 +104,11 @@ uniform vec2 uCenter;
 uniform vec2 uHalf;
 uniform float uCorner;
 uniform float uSoft;
-uniform float uMosaic;
+uniform float uMosaic;      // 1 → todo micro-ASCII, 0 → vídeo nítido
 uniform float uVAspect;
 uniform vec2 uMagPos;
 uniform float uMagR;
+uniform float uPulse;
 uniform float uDpr;
 uniform float uTime;
 uniform float uAlpha;
@@ -126,42 +120,51 @@ float sdRoundBox(vec2 p, vec2 b, float r){
 }
 vec3 vid(vec2 pt){ return texture2D(tVideo, coverUV(pt, uCenter, uHalf, uVAspect)).rgb; }
 
-vec3 asciiAt(vec2 frag, float cs){
-  vec2 cc = (floor(frag / cs) + 0.5) * cs;
-  vec3 c = vid(cc);
+// celda ASCII anclada al espacio del vídeo (origin = esquina del rectángulo) → sin temblor al mover el cursor
+vec4 asciiSample(vec2 frag, vec2 origin, float cs, float boost){
+  vec2 rel = frag - origin;
+  vec2 cell = floor(rel / cs);
+  vec3 c = vid(origin + (cell + 0.5) * cs);
   float lum = dot(c, vec3(0.299, 0.587, 0.114));
-  float g = floor(clamp(pow(lum, 0.8) * 1.2, 0.0, 1.0) * 8.99);
-  float a = glyphAlpha(g, fract(frag / cs));
-  return mix(c * 0.10, c * 1.3, a);
-}
-vec3 mosaicAt(vec2 frag, float cs){
-  return vid((floor(frag / cs) + 0.5) * cs);
+  lum = clamp((lum - 0.03) * 1.3, 0.0, 1.0);
+  float gf = pow(lum, 0.85) * 8.99 + boost * (0.6 + hash12(cell + floor(uTime * 12.0)));
+  float g = floor(clamp(gf, 0.0, 8.99));
+  float a = glyphAlpha(g, fract(rel / cs), cs * uDpr);
+  float dense = step(5.5, g);                                   // # % @ → realce fósforo
+  vec3 gc = c * (1.12 + 0.30 * dense) + dense * vec3(0.015, 0.07, 0.03);
+  return vec4(gc, a);
 }
 
 void main(){
   if (uAlpha <= 0.001) discard;
   vec2 frag = gl_FragCoord.xy / uDpr;
   float sd = sdRoundBox(frag - uCenter, uHalf, uCorner);
-  float mask = smoothstep(0.0, uSoft, -sd);          // borde suave hacia el fondo principal
+  float mask = smoothstep(0.0, uSoft, -sd);
   if (mask < 0.004) discard;
-
-  // mosaico de bloques que se subdividen en pasos (80 → 1 px)
-  float lvl = floor((1.0 - uMosaic) * 7.0);
-  float block = uMosaic > 0.002 ? 80.0 * exp2(-lvl) : 1.0;
   vec2 origin = uCenter - uHalf;
-  vec2 sp = block > 1.5 ? origin + (floor((frag - origin) / block) + 0.5) * block : frag;
-  vec3 col = vid(sp);
+  vec3 col = vid(frag);
 
-  if (uMagR > 1.0) {
-    float d = length(frag - uMagPos);
-    float R = uMagR;
-    float wA = 1.0 - smoothstep(0.30 * R, 0.42 * R, d);   // núcleo: ASCII ~6 px
-    float wB = 1.0 - smoothstep(0.62 * R, 0.74 * R, d);   // anillo: ASCII ~13 px
-    float wC = 1.0 - smoothstep(0.88 * R, 1.00 * R, d);   // exterior: mosaico → vídeo
-    col = mix(col, mosaicAt(frag, 14.0), wC);
-    col = mix(col, asciiAt(frag, 13.0), wB);
-    col = mix(col, asciiAt(frag, 6.0), wA);
+  // apertura: micro-caracteres técnicos que se disuelven celda a celda hasta el vídeo nítido
+  if (uMosaic > 0.002) {
+    vec2 cell = floor((frag - origin) / 5.0);
+    float r = hash12(cell);
+    float amt = smoothstep(r * 0.55, r * 0.55 + 0.45, uMosaic);
+    vec4 s = asciiSample(frag, origin, 5.0, 0.0);
+    col = mix(col, mix(vec3(0.07), s.rgb, s.a), amt);
   }
-  col += (hash12(gl_FragCoord.xy + fract(uTime) * 57.3) - 0.5) * 0.05;   // grano 2–3 %
+
+  // escáner micro-ASCII radial (máscara orgánica continua, sin anillos ni bloques)
+  if (uMagR > 1.0) {
+    vec2 dv = frag - uMagPos;
+    float d = length(dv), ang = atan(dv.y, dv.x);
+    float n = 0.5 * sin(ang * 7.0 + uTime * 1.7) + 0.5 * sin(ang * 13.0 - uTime * 2.3);
+    float scan = 0.5 + 0.5 * sin(ang * 40.0 + uTime * 6.0);
+    float Rn = uMagR * (1.0 + 0.07 * n + 0.025 * scan);
+    float w = pow(1.0 - smoothstep(0.22 * Rn, Rn, d), 1.3);
+    vec4 s = asciiSample(frag, origin, 4.5, uPulse * (1.0 + 0.4 * sin(uTime * 18.0 - d * 0.12)));
+    vec3 base = col * (1.0 - 0.22 * w);                         // celda apenas oscurecida, nunca un círculo opaco
+    col = mix(base, s.rgb, clamp(s.a * w * 1.1, 0.0, 1.0));
+  }
+  col += (hash12(gl_FragCoord.xy + fract(uTime) * 57.3) - 0.5) * 0.05;
   gl_FragColor = vec4(col, mask * uAlpha);
 }`;
