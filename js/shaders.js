@@ -1,4 +1,5 @@
-// shaders.js — atlas tipográfico + GLSL: capa ASCII fija (+ horizonte de eventos), fondo ASCII (+ blackout) y escáner graduado.
+// shaders.js — malla ASCII unificada (fuente única GRID_CELL_SIZE), atlas tipográfico y GLSL.
+export const GRID_CELL_SIZE = 7;
 export const DEFAULT_CHARSET = ['.', ':', ';', '=', '+', 'x', '#', '%', '@'];
 export const ATLAS_CELL = 48;
 
@@ -42,24 +43,29 @@ export const QUAD_VS = /* glsl */`
 varying vec2 vUv;
 void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
-/* Capa ASCII de grilla fija + horizonte de eventos (núcleo hueco #000000 con borde incandescente sutil en HERO_TEXT). */
+/* Capa ASCII de grilla fija (origen superior-izquierdo unificado con BG_FS) + horizonte de eventos con halo difuso cálido-blanco. */
 export const GRID_FS = /* glsl */`
 ${COMMON}
 uniform sampler2D tGrid;
 uniform vec2 uGrid;
+uniform vec2 uRes;
 uniform float uCell;
 uniform float uDpr;
 uniform vec2 uBhPos;        // coords CSS (y hacia arriba)
 uniform float uBhR;         // radio del horizonte de eventos (0 = inactivo)
-uniform float uBhRim;       // intensidad del aro fotónico exterior
+uniform float uBhRim;       // intensidad del halo difuso exterior
+uniform float uBhWarm;      // 0 = blanco puro, 1 = sutil matiz cálido-blanco al mezclarse el fondo
 varying vec2 vUv;
 void main(){
   vec2 frag = gl_FragCoord.xy / uDpr;
-  vec2 c = floor(frag / uCell);
-  vec4 d = texture2D(tGrid, (c + 0.5) / uGrid);
+  // origen común (0,0) en esquina superior izquierda — alineación exacta al píxel con BG_FS
+  vec2 screenCss = vec2(frag.x, uRes.y - frag.y);
+  vec2 cellId = floor(screenCss / uCell);
+  vec2 cellFrac = fract(screenCss / uCell);
+  vec4 d = texture2D(tGrid, (cellId + 0.5) / uGrid);
   float g = floor(d.a);
   float al = (d.a - g) / 0.99;
-  float ga = glyphAlpha(g, fract(frag / uCell), uCell * uDpr);
+  float ga = glyphAlpha(g, vec2(cellFrac.x, 1.0 - cellFrac.y), uCell * uDpr);
   float a = clamp(ga * al * 1.25, 0.0, 1.0);
   vec3 col = d.rgb;
 
@@ -69,9 +75,10 @@ void main(){
     float hole = 1.0 - smoothstep(uBhR * 0.90, uBhR * 1.06, db);
     float haloT = clamp((db - uBhR * 0.95) / max(uBhR * 0.54, 7.0), 0.0, 1.0);
     float halo = pow(1.0 - haloT, 2.2) * smoothstep(uBhR * 0.82, uBhR * 1.04, db) * uBhRim * 0.52;
+    vec3 haloCol = mix(vec3(1.0), vec3(1.0, 0.91, 0.76), uBhWarm * 0.65);
     if (hole > 0.004 || halo > 0.006) {
       vec3 gRgb = col * a;
-      vec3 outRgb = mix(gRgb + vec3(halo), vec3(0.0), hole);
+      vec3 outRgb = mix(gRgb + haloCol * halo, vec3(0.0), hole);
       float outA = max(hole, clamp(a + halo * 0.85, 0.0, 1.0));
       if (outA < 0.02) discard;
       gl_FragColor = vec4(outRgb / max(outA, 0.001), outA);
@@ -82,62 +89,44 @@ void main(){
   gl_FragColor = vec4(col, a);
 }`;
 
-/* Fondo: filtro ASCII/semitono del vídeo (con crossfade A→B) + tinte ambiental + grano + blackout del agujero negro. */
+/* Fondo ASCII alineado a la misma malla global (GRID_CELL_SIZE, origen superior-izquierdo), sin warp UV. */
 export const BG_FS = /* glsl */`
 ${COMMON}
 uniform sampler2D tA;
 uniform sampler2D tB;
 uniform float uMix;
 uniform vec2 uRes;
+uniform float uCell;
 uniform float uDpr;
 uniform float uTime;
 uniform float uBgAmt;
-uniform float uSimplify;
+uniform float uBgLive;      // 1 = fondo vivo normal, 0 = vacío #000000 al sustituirse por partículas capturadas
 uniform vec3 uBase;
 uniform vec3 uTint;
 uniform float uTintAmt;
 uniform float uVAspect;
-uniform vec2 uBlackHolePos;   // coords normalizadas [0,1] del agujero negro
-uniform float uBlackHolePull; // 0 = normal, 1 = succión/vórtice total hacia #000000
 varying vec2 vUv;
 void main(){
   vec2 frag = gl_FragCoord.xy / uDpr;
   vec3 col = mix(uBase, uTint, uTintAmt);
-  vec2 sampleFrag = frag;
-  float swallowKeep = 1.0;
 
-  if (uBlackHolePull > 0.001) {
-    vec2 bhPx = uBlackHolePos * uRes;
-    vec2 toFrag = frag - bhPx;
-    float dist = length(toFrag);
-    float maxD = length(uRes);
-    float nd = dist / max(maxD, 1.0);
-    float pull = uBlackHolePull;
-    // curvatura espiral y succión gravitacional de las UV del fondo ASCII hacia el agujero negro
-    float swirl = pull * (2.9 / (nd + 0.18));
-    float cr = cos(swirl), sr = sin(swirl);
-    float stretch = 1.0 + pull * 1.15 * exp(-nd * 2.1) + pull * 0.42;
-    sampleFrag = bhPx + mat2(cr, -sr, sr, cr) * (toFrag * stretch);
-    // máscara radial progresiva desde el perímetro hacia el centro oscureciendo a #000000 lo ya tragado
-    float ang = atan(toFrag.y, toFrag.x);
-    float wave = 26.0 * sin(ang * 3.0 + dist * 0.014 - uTime * 2.8) * pull;
-    float swallowR = maxD * (1.08 - pull * 1.16) + wave;
-    swallowKeep = 1.0 - smoothstep(swallowR - 130.0, swallowR + 35.0, dist);
-  }
-
-  if (uBgAmt > 0.003 && swallowKeep > 0.003) {
-    float cs = 9.0 * uSimplify;
-    vec2 cc = (floor(sampleFrag / cs) + 0.5) * cs;
-    vec2 uv = coverUV(cc, uRes * 0.5, uRes * 0.5, uVAspect);
+  if (uBgAmt > 0.003 && uBgLive > 0.003) {
+    // misma cuadrícula exacta (0,0 arriba-izquierda) y misma rampa Técnica que GRID_FS
+    vec2 screenCss = vec2(frag.x, uRes.y - frag.y);
+    vec2 cellId = floor(screenCss / uCell);
+    vec2 cellFrac = fract(screenCss / uCell);
+    vec2 cellCenterCss = (cellId + 0.5) * uCell;
+    vec2 cellCenterUp = vec2(cellCenterCss.x, uRes.y - cellCenterCss.y);
+    vec2 uv = coverUV(cellCenterUp, uRes * 0.5, uRes * 0.5, uVAspect);
     vec3 v = mix(texture2D(tA, uv).rgb, texture2D(tB, uv).rgb, uMix);
     float lum = dot(v, vec3(0.299, 0.587, 0.114));
     float g = floor(clamp(pow(lum, 0.75) * 1.25, 0.0, 1.0) * 8.99);
-    float a = glyphAlpha(g, fract(sampleFrag / cs), cs * uDpr);
-    float vig = 1.0 - 0.45 * smoothstep(0.35, 0.95, length((sampleFrag / uRes - 0.5) * vec2(1.0, 0.9)) * 1.6);
+    float a = glyphAlpha(g, vec2(cellFrac.x, 1.0 - cellFrac.y), uCell * uDpr);
+    float vig = 1.0 - 0.45 * smoothstep(0.35, 0.95, length((cellCenterUp / uRes - 0.5) * vec2(1.0, 0.9)) * 1.6);
     col += (v * 0.035 + v * a * 0.30) * uBgAmt * vig;
   }
   col += (hash12(gl_FragCoord.xy + fract(uTime) * 91.7) - 0.5) * 0.05;   // grano ~2.5 %
-  col *= swallowKeep;
+  col *= uBgLive;
   gl_FragColor = vec4(col, 1.0);
 }`;
 

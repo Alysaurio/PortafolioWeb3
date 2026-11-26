@@ -1,7 +1,7 @@
 // main.js — orquestador: máquina de estados, proyección radial del «arito» (+30 % diámetro, escala por posición e independiente),
 // acoplamiento del campo de empuje al vídeo del «arito», DETAIL_RECT estable y agujero negro gravitacional en HERO_TEXT.
 import * as THREE from 'three';
-import { QUAD_VS, BG_FS, BOX_FS, createGlyphAtlas } from './shaders.js';
+import { GRID_CELL_SIZE, QUAD_VS, BG_FS, BOX_FS, createGlyphAtlas } from './shaders.js';
 import { PHYSICS_CONFIG, ParticleSystem, centerAngle, boundaryAngle, segmentAt, wrapAngle } from './particles.js';
 import { VideoManager } from './videoManager.js';
 
@@ -74,15 +74,14 @@ function start(projects, canvas, gl2, FONT) {
   const atlas = createGlyphAtlas(THREE, PHYSICS_CONFIG.charset);
   const videos = new VideoManager(projects);
 
-  // --- fondo (filtro ASCII + tinte + grano + blackout agujero negro) ---
+  // --- fondo (malla ASCII unificada con GRID_CELL_SIZE, sin warp UV) ---
   const bgMat = new THREE.ShaderMaterial({
     vertexShader: QUAD_VS, fragmentShader: BG_FS, depthTest: false, depthWrite: false,
     uniforms: {
       tA: { value: videos.getTexture(0) }, tB: { value: videos.getTexture(0) }, tAtlas: { value: atlas },
-      uMix: { value: 0 }, uRes: { value: new THREE.Vector2(1, 1) }, uDpr: { value: dpr }, uTime: { value: 0 },
-      uBgAmt: { value: 1 }, uSimplify: { value: 1 }, uBase: { value: new THREE.Vector3(...BASE_BG) },
+      uMix: { value: 0 }, uRes: { value: new THREE.Vector2(1, 1) }, uCell: { value: GRID_CELL_SIZE }, uDpr: { value: dpr }, uTime: { value: 0 },
+      uBgAmt: { value: 1 }, uBgLive: { value: 1 }, uBase: { value: new THREE.Vector3(...BASE_BG) },
       uTint: { value: new THREE.Vector3(...BASE_BG) }, uTintAmt: { value: 0 }, uVAspect: { value: 16 / 9 },
-      uBlackHolePos: { value: new THREE.Vector2(0.5, 0.5) }, uBlackHolePull: { value: 0 },
     },
   });
   const bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat);
@@ -130,8 +129,8 @@ function start(projects, canvas, gl2, FONT) {
 
   // estado del agujero negro en HERO_TEXT
   let bhMode = 'idle';          // 'idle' | 'active' | 'restoring'
-  let bhBgSpawned = false, bhDomCaptured = false;
-  let bhPull = 0;               // 0 → normal, 1 → vórtice/succión total del fondo ASCII hacia #000000
+  let bhBgCaptured = false, bhDomCaptured = false;
+  let bhBgLive = 1;             // 1 → fondo vivo normal, 0 → vacío #000000 al sustituirse por partículas 1:1
   let bhDomAlpha = 1;           // opacidad multiplicativa de #hero-sub y #scroll-hint
 
   const cur = { x: 0, y: 0, px: 0, py: 0, sx: 0, sy: 0, vx: 0, vy: 0, speed: 0, valid: false };
@@ -180,37 +179,57 @@ function start(projects, canvas, gl2, FONT) {
   window.addEventListener('scroll', onScroll, { passive: true });
 
   /* ===================== AGUJERO NEGRO EN HERO_TEXT ===================== */
-  /** Pre-muestrea el fondo ASCII actual a la MISMA escala de celda para desprenderlo progresivamente con el vórtice. */
+  /** Captura 1:1 del fondo ASCII sobre la grilla compartida (gridCols × gridRows) con el mismo recorte coverUV que BG_FS. */
   function spawnHeroBgReplicas() {
-    const out = [];
-    const gw = 38, gh = 22;
+    const cs = GRID_CELL_SIZE;
+    const gw = Math.ceil(W / cs), gh = Math.ceil(H / cs);
     const cv = document.createElement('canvas'); cv.width = gw; cv.height = gh;
     const g = cv.getContext('2d', { willReadFrequently: true });
-    let dataA = null, dataB = null;
-    try { g.drawImage(videos.getSource(curBgA), 0, 0, gw, gh); dataA = g.getImageData(0, 0, gw, gh).data; } catch (e) { /* noop */ }
-    if (curBgMix > 0.02 && curBgB !== curBgA) {
-      try { g.drawImage(videos.getSource(curBgB), 0, 0, gw, gh); dataB = g.getImageData(0, 0, gw, gh).data; } catch (e) { /* noop */ }
-    }
-    for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
-      const idx = (y * gw + x) * 4;
-      let r = dataA ? dataA[idx] / 255 : 0.25, gg = dataA ? dataA[idx + 1] / 255 : 0.25, b = dataA ? dataA[idx + 2] / 255 : 0.28;
-      if (dataB) {
-        r = lerp(r, dataB[idx] / 255, curBgMix);
-        gg = lerp(gg, dataB[idx + 1] / 255, curBgMix);
-        b = lerp(b, dataB[idx + 2] / 255, curBgMix);
+    const va = 16 / 9, ba = W / Math.max(1, H);
+    const drawCover = (src) => {
+      if (!src) return null;
+      const sw0 = src.videoWidth || src.width || 512, sh0 = src.videoHeight || src.height || 288;
+      let sx = 0, sy = 0, sw = sw0, sh = sh0;
+      if (ba > va) { sh = sh0 * (va / ba); sy = (sh0 - sh) * 0.5; }
+      else         { sw = sw0 * (ba / va); sx = (sw0 - sw) * 0.5; }
+      try { g.drawImage(src, sx, sy, sw, sh, 0, 0, gw, gh); return g.getImageData(0, 0, gw, gh).data; }
+      catch (e) { return null; }
+    };
+    const dataA = drawCover(videos.getSource(curBgA));
+    const dataB = (curBgMix > 0.02 && curBgB !== curBgA) ? drawCover(videos.getSource(curBgB)) : null;
+
+    // 1a pasada: recoge celdas visibles (omite celdas oscuras)
+    const visible = [];
+    for (let row = 0; row < gh; row++) {
+      const syCss = row * cs + cs * 0.5;
+      const ny = (H - syCss) / Math.max(1, H);
+      for (let col = 0; col < gw; col++) {
+        const idx = (row * gw + col) * 4;
+        let r = dataA ? dataA[idx] / 255 : 0.22, gg = dataA ? dataA[idx + 1] / 255 : 0.22, b = dataA ? dataA[idx + 2] / 255 : 0.25;
+        if (dataB) {
+          r = lerp(r, dataB[idx] / 255, curBgMix);
+          gg = lerp(gg, dataB[idx + 1] / 255, curBgMix);
+          b = lerp(b, dataB[idx + 2] / 255, curBgMix);
+        }
+        const sxCss = col * cs + cs * 0.5;
+        const nx = sxCss / Math.max(1, W);
+        const vig = 1 - 0.45 * smooth(0.35, 0.95, Math.hypot(nx - 0.5, (ny - 0.5) * 0.9) * 1.6);
+        const lum = (0.299 * r + 0.587 * gg + 0.114 * b) * vig;
+        if (lum < 0.055) continue;
+        visible.push({ x: sxCss - W * 0.5, y: H * 0.5 - syCss, r, g: gg, b, lum });
       }
-      const nx = (x + 0.5) / gw, ny = (y + 0.5) / gh;
-      const vig = 1 - 0.45 * smooth(0.35, 0.95, Math.hypot(nx - 0.5, (ny - 0.5) * 0.9) * 1.6);
-      const lum = (0.299 * r + 0.587 * gg + 0.114 * b) * vig;
-      if (lum < 0.045) continue;
-      // peso y color a la misma escala visual ASCII del fondo original (con ligero realce al girar hacia el disco)
-      out.push({
-        x: (nx - 0.5) * W, y: (0.5 - ny) * H,
-        r: Math.min(1, r * 0.85 + 0.08), g: Math.min(1, gg * 0.85 + 0.08), b: Math.min(1, b * 0.85 + 0.08),
-        w: clamp(lum * 1.55, 0.45, 1.32),
-      });
     }
-    ps.addExtraParticles(out, false);   // inactivas hasta que el frente de succión del vórtice las desprenda
+    // límite de seguridad para 60 FPS en resoluciones muy altas (p. ej. 4K) sin patrón de tablero
+    const maxBg = 15200;
+    let chosen = visible;
+    if (visible.length > maxBg) {
+      chosen = [];
+      const keep = maxBg / visible.length;
+      for (let i = 0; i < visible.length; i++) if (Math.random() < keep) chosen.push(visible[i]);
+    }
+    ps.addExtraParticles(chosen, true);
+    // apaga el fondo vivo en el MISMO fotograma → transición 1:1 invisible hacia partículas reales
+    bhBgLive = 0;
   }
 
   /** Rasteriza subtítulo y SCROLL ↓ en sus coordenadas reales en pantalla y los oculta inmediatamente del DOM. */
@@ -249,7 +268,7 @@ function start(projects, canvas, gl2, FONT) {
           pts.push({
             x: rect.left - 6 + px - W * 0.5,
             y: H * 0.5 - (rect.top - 4 + py),
-            r: 0.78, g: 0.78, b: 0.80, w: 0.78,
+            r: 0.80, g: 0.80, b: 0.82, lum: 0.95,
           });
         }
       }
@@ -258,8 +277,7 @@ function start(projects, canvas, gl2, FONT) {
     };
     rasterEl(heroSub, 340);
     rasterEl(scrollHint, 120);
-    ps.addExtraParticles(out, true);
-    // oculta ambos nodos DOM con prioridad estricta (detiene la animación CSS @keyframes hint de SCROLL ↓)
+    ps.addExtraParticles(out, false);
     bhDomAlpha = 0;
     bodyEl.classList.add('bh-hide-dom');
     scrollHint.style.animation = 'none';
@@ -287,7 +305,7 @@ function start(projects, canvas, gl2, FONT) {
     if (state === STATE.HERO_TEXT && scrollP < 0.08 && bhMode === 'idle') {
       if (e.target && e.target.closest && e.target.closest('a,button')) return;
       cur.x = e.clientX - W / 2; cur.y = H / 2 - e.clientY; cur.sx = e.clientX; cur.sy = e.clientY; cur.valid = true;
-      bhMode = 'active'; bhBgSpawned = false; bhDomCaptured = false;
+      bhMode = 'active'; bhBgCaptured = false; bhDomCaptured = false; bhBgLive = 1;
       bodyEl.classList.add('bh-active');
       ps.startBlackHole(cur.x, cur.y);
     }
@@ -559,37 +577,35 @@ function start(projects, canvas, gl2, FONT) {
     curBgA = bgA; curBgB = bgB; curBgMix = bgMix;
 
     needed.clear();
-    if (bgAmt > 0.01 && bhPull < 0.99) { needed.add(bgA); needed.add(bgB); }
+    if (bgAmt > 0.01 && bhBgLive > 0.01) { needed.add(bgA); needed.add(bgB); }
     const cb = currentBox();
     const boxOn = !!cb && (vidR >= MIN_VIDEO_PX || detailP > 0.01);
     if (boxOn) needed.add(previewId);
     videos.update(t, dt, needed, boxOn ? previewId : -1);
     for (let k = 0; k < N; k++) colorsRef[k] = videos.getColor(k);
 
-    // --- ciclo del agujero negro en HERO_TEXT (vórtice real del fondo + absorción de textos DOM + restauración limpia) ---
+    // --- cascada temprana de absorción en HERO_TEXT (Etapa 2: textos >= 0.22 · Etapa 3: fondo 1:1 >= 0.55) ---
     const bhs = ps.getBlackHoleState();
     if (bhMode === 'active') {
-      if (bhs.ratio >= 0.45) {
-        if (!bhBgSpawned) { bhBgSpawned = true; spawnHeroBgReplicas(); }
-        const pullTarget = clamp01((bhs.ratio - 0.45) / 0.42);
-        const minRamp = bhs.ratio >= 0.72 ? clamp01(bhPull + dt * 0.55) : pullTarget;
-        bhPull += (Math.max(pullTarget, minRamp) - bhPull) * expK(6, dt);
-        const swallowR = Math.hypot(W, H) * (1.08 - bhPull * 1.16);
-        ps.activateExtrasOutside(swallowR);
-      }
-      if (!bhDomCaptured && bhs.ratio >= 0.72) {
+      if (!bhDomCaptured && bhs.ratio >= 0.22) {
         bhDomCaptured = true;
         spawnHeroTextReplicas();
       }
+      if (!bhBgCaptured && bhs.ratio >= 0.55) {
+        bhBgCaptured = true;
+        spawnHeroBgReplicas();
+      }
     } else if (bhMode === 'restoring') {
       const rt = bhs.relTime;
-      bhPull = Math.max(0, bhPull - dt * 1.75);
-      if (bhDomCaptured && rt >= 0.45) {
+      if (bhBgCaptured) {
+        bhBgLive = easeOutCubic(clamp01((rt - 0.24) / 0.62));
+      }
+      if (bhDomCaptured && rt >= 0.42) {
         bodyEl.classList.remove('bh-hide-dom');
-        bhDomAlpha = easeOutCubic(clamp01((rt - 0.45) / 0.45));
+        bhDomAlpha = easeOutCubic(clamp01((rt - 0.42) / 0.48));
       }
       if (!bhs.releasing) {
-        bhMode = 'idle'; bhBgSpawned = false; bhDomCaptured = false; bhPull = 0; bhDomAlpha = 1;
+        bhMode = 'idle'; bhBgCaptured = false; bhDomCaptured = false; bhBgLive = 1; bhDomAlpha = 1;
         bodyEl.classList.remove('bh-active', 'bh-hide-dom');
         scrollHint.style.animation = '';
       }
@@ -671,12 +687,9 @@ function start(projects, canvas, gl2, FONT) {
     const bu = bgMat.uniforms;
     bu.tA.value = videos.getTexture(bgA); bu.tB.value = videos.getTexture(bgB);
     bu.uMix.value = bgMix; bu.uTime.value = t; bu.uBgAmt.value = bgAmt;
-    bu.uSimplify.value = 1 + 0.5 * smooth(0.1, 0.45, scrollP);
-    const bhsNow = ps.getBlackHoleState();
+    bu.uBgLive.value = bhBgLive;
     bu.uTint.value.set(tintCol[0], tintCol[1], tintCol[2]);
     bu.uTintAmt.value = tintAmt * TINT_MAX;
-    bu.uBlackHolePos.value.set((W * 0.5 + bhsNow.x) / Math.max(1, W), (H * 0.5 + bhsNow.y) / Math.max(1, H));
-    bu.uBlackHolePull.value = bhPull;
 
     // --- caja de vídeo + escáner ASCII graduado ---
     if (boxOn) {

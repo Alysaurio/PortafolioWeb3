@@ -3,12 +3,13 @@
 // • DETAIL_RECT con asentamiento sobreamortiguado (sin rebote), ondas contrapuestas, interacción unidireccional y barrera SDF estricta
 // • Agujero negro gravitacional en HERO_TEXT (masa progresiva, disco de acreción, absorción del fondo/textos y explosión restauradora)
 import * as THREE from 'three';
-import { GRID_FS, QUAD_VS } from './shaders.js';
+import { GRID_CELL_SIZE, GRID_FS, QUAD_VS } from './shaders.js';
+export { GRID_CELL_SIZE };
 
 /* ======================= AJUSTES FÍSICOS CENTRALIZADOS ======================= */
 export const PHYSICS_CONFIG = {
   charset: ['.', ':', ';', '=', '+', 'x', '#', '%', '@'],   // rampa Técnica (baja → alta densidad)
-  cellSize: 7,                       // px de la grilla ASCII fija (6–7)
+  cellSize: GRID_CELL_SIZE,          // fuente única compartida con BG_FS y GRID_FS (7 px CSS)
   particleCount: { low: 2600, mid: 2900, high: 3200 },   // pool fijo estrictamente conservado
   pushForce: 1.00,                   // impulso del cursor en estado base
   previewInnerPushScale: 0.18,       // empuje suave del círculo del vídeo del «arito»
@@ -54,7 +55,7 @@ const TC = 4;
 const ROPE_N = 96;
 const LW = 24, LH = 14;
 const RING_BUCKETS = 36, ARITO_BUCKETS = 24, TOTAL_BUCKETS = RING_BUCKETS + ARITO_BUCKETS;
-const MAX_EXTRA = 1300;              // pool temporal para fondo ASCII + textos HTML absorbidos en HERO_TEXT
+const MAX_EXTRA = 16000;             // pool plano O(N) para captura 1:1 del fondo ASCII + textos HTML (60 FPS)
 const TWO_PI = Math.PI * 2;
 const HALF_PI = Math.PI * 0.5;
 
@@ -273,19 +274,20 @@ export class ParticleSystem {
     this.bActive = new Uint8Array(TOTAL_BUCKETS);
     this.gapAge = new Float32Array(TOTAL_BUCKETS); this.spawnAcc = new Float32Array(TOTAL_BUCKETS);
 
-    // pool temporal ligero para réplicas absorbidas del fondo ASCII y los textos HTML en el clímax del agujero negro
+    // pool plano O(N) para captura 1:1 del fondo ASCII y textos HTML en el agujero negro (cero SPH, 60 FPS)
     this.extraCount = 0;
     this.exX = new Float32Array(MAX_EXTRA); this.exY = new Float32Array(MAX_EXTRA);
     this.exOx = new Float32Array(MAX_EXTRA); this.exOy = new Float32Array(MAX_EXTRA);
     this.exVx = new Float32Array(MAX_EXTRA); this.exVy = new Float32Array(MAX_EXTRA);
+    this.exR0 = new Float32Array(MAX_EXTRA); this.exG0 = new Float32Array(MAX_EXTRA); this.exB0 = new Float32Array(MAX_EXTRA);
     this.exR = new Float32Array(MAX_EXTRA); this.exG = new Float32Array(MAX_EXTRA); this.exB = new Float32Array(MAX_EXTRA);
-    this.exW = new Float32Array(MAX_EXTRA); this.exE = new Float32Array(MAX_EXTRA);
+    this.exLum = new Float32Array(MAX_EXTRA); this.exE = new Float32Array(MAX_EXTRA);
     this.exRnd = new Float32Array(MAX_EXTRA);
-    this.exActive = new Uint8Array(MAX_EXTRA);
+    this.exIsBg = new Uint8Array(MAX_EXTRA);
     for (let i = 0; i < MAX_EXTRA; i++) this.exRnd[i] = Math.random();
 
     // estado interno del agujero negro
-    this.bh = { active: false, releasing: false, x: 0, y: 0, time: 0, relTime: 0, ratio: 0, ratioSm: 0, ehR: 0, ehVis: 0, rim: 0 };
+    this.bh = { active: false, releasing: false, x: 0, y: 0, time: 0, bgTime: 0, bgCaptured: false, relTime: 0, ratio: 0, ratioSm: 0, ehR: 0, ehVis: 0, rim: 0, warm: 0 };
     this.heroNoBounce = false;
 
     for (let i = 0; i < n; i++) { this.rnd[i] = Math.random(); this.rectU[i] = i / n; this.rectOff[i] = (Math.random() - 0.5) * 1.5; }
@@ -294,8 +296,8 @@ export class ParticleSystem {
       vertexShader: QUAD_VS, fragmentShader: GRID_FS, transparent: true, depthTest: false, depthWrite: false,
       uniforms: {
         tGrid: { value: null }, tAtlas: { value: atlas }, uGrid: { value: new THREE.Vector2(1, 1) },
-        uCell: { value: C.cellSize }, uDpr: { value: 1 },
-        uBhPos: { value: new THREE.Vector2() }, uBhR: { value: 0 }, uBhRim: { value: 0 },
+        uRes: { value: new THREE.Vector2(1, 1) }, uCell: { value: C.cellSize }, uDpr: { value: 1 },
+        uBhPos: { value: new THREE.Vector2() }, uBhR: { value: 0 }, uBhRim: { value: 0 }, uBhWarm: { value: 0 },
       },
     });
     this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.material);
@@ -344,7 +346,7 @@ export class ParticleSystem {
     this.gridTex.minFilter = this.gridTex.magFilter = THREE.NearestFilter;
     this.gridTex.generateMipmaps = false; this.gridTex.needsUpdate = true;
     const u = this.material.uniforms;
-    u.tGrid.value = this.gridTex; u.uGrid.value.set(this.gw, this.gh); u.uDpr.value = dpr;
+    u.tGrid.value = this.gridTex; u.uGrid.value.set(this.gw, this.gh); u.uRes.value.set(W, H); u.uDpr.value = dpr;
     this.hgw = Math.ceil(W / HC) + 3; this.hgh = Math.ceil(H / HC) + 3;
     this.hStart = new Int32Array(this.hgw * this.hgh + 1);
     this.S.ropeH = H * 0.46;
@@ -447,37 +449,30 @@ export class ParticleSystem {
   startBlackHole(x, y) {
     const bh = this.bh;
     bh.active = true; bh.releasing = false; bh.x = x; bh.y = y;
-    bh.time = 0; bh.relTime = 0; bh.ratio = 0; bh.ratioSm = 0;
-    bh.ehR = C.bhEhMin; bh.ehVis = 4; bh.rim = 0.55;
+    bh.time = 0; bh.bgTime = 0; bh.bgCaptured = false; bh.relTime = 0; bh.ratio = 0; bh.ratioSm = 0;
+    bh.ehR = C.bhEhMin; bh.ehVis = 4; bh.rim = 0.55; bh.warm = 0;
     this.heroNoBounce = false;
     this.bhPulled.fill(0);
     this.extraCount = 0;
   }
 
-  /** Añade partículas temporales (réplicas del fondo ASCII y textos HTML); active=0 permite desprenderlas al paso del vórtice. */
-  addExtraParticles(list, immediate = true) {
+  /** Añade partículas temporales (isBg=true para captura 1:1 del fondo ASCII, false para textos HTML). */
+  addExtraParticles(list, isBg = false) {
     let k = this.extraCount;
     for (let i = 0; i < list.length && k < MAX_EXTRA; i++, k++) {
       const p = list[i];
       this.exX[k] = this.exOx[k] = p.x;
       this.exY[k] = this.exOy[k] = p.y;
       this.exVx[k] = 0; this.exVy[k] = 0;
-      this.exR[k] = p.r; this.exG[k] = p.g; this.exB[k] = p.b;
-      this.exW[k] = p.w; this.exE[k] = 0;
-      this.exActive[k] = immediate ? 1 : 0;
+      this.exR0[k] = this.exR[k] = p.r;
+      this.exG0[k] = this.exG[k] = p.g;
+      this.exB0[k] = this.exB[k] = p.b;
+      this.exLum[k] = p.lum;
+      this.exE[k] = 0;
+      this.exIsBg[k] = isBg ? 1 : 0;
     }
     this.extraCount = k;
-  }
-
-  /** Desprende las partículas de fondo situadas fuera del radio del frente de succión (sincronizado con BG_FS). */
-  activateExtrasOutside(swallowR) {
-    const bx = this.bh.x, by = this.bh.y, thr = Math.max(0, swallowR - 55);
-    const thr2 = thr * thr;
-    for (let k = 0; k < this.extraCount; k++) {
-      if (this.exActive[k]) continue;
-      const dx = this.exX[k] - bx, dy = this.exY[k] - by;
-      if (dx * dx + dy * dy >= thr2) this.exActive[k] = 1;
-    }
+    if (isBg) { this.bh.bgCaptured = true; this.bh.bgTime = 0; }
   }
 
   clearExtraParticles() { this.extraCount = 0; }
@@ -508,12 +503,11 @@ export class ParticleSystem {
     }
     const power = 750 + 950 * Math.max(0.25, bh.ratioSm);
     for (let k = 0; k < this.extraCount; k++) {
-      if (!this.exActive[k]) continue;
       const dx = this.exX[k] - bx, dy = this.exY[k] - by, d = Math.hypot(dx, dy);
       const ang = d > 1 ? Math.atan2(dy, dx) : this.exRnd[k] * TWO_PI;
       const sp = power * (0.65 + 0.65 * this.exRnd[k]);
       this.exVx[k] = Math.cos(ang) * sp; this.exVy[k] = Math.sin(ang) * sp;
-      this.exE[k] = 0.7;
+      this.exE[k] = 0.65;
     }
   }
 
@@ -891,16 +885,29 @@ export class ParticleSystem {
         }
         x = Math.max(-hW + 1, Math.min(hW - 1, x)); y = Math.max(-hH + 1, Math.min(hH - 1, y));
         px[i] = x; py[i] = y; vxA[i] = vx; vyA[i] = vy;
-        this.cr[i] = this.cg[i] = this.cb[i] = 1;
-        // energía graduada: núcleos @ % # pegados al horizonte, degradándose hacia x + = ; : . en la periferia
+        // sutil reflejo cálido-blanco en ALYSAURIO cuando el fondo se mezcla en el disco de acreción
         const eRad = Math.pow(Math.max(0, 1 - (d - ehMin) / (diskSpread * 1.15)), 1.55);
+        const wMix = bh.warm * eRad * 0.22;
+        this.cr[i] = 1; this.cg[i] = 1 - 0.06 * wMix; this.cb[i] = 1 - 0.16 * wMix;
         this.en[i] = Math.min(1, Math.max(eRad, Math.sqrt(sp2) / 3400 * 0.45));
       }
 
-      // física gravitacional para las réplicas temporales activas (fondo ASCII + subtítulo + SCROLL ↓)
+      // física gravitacional O(N) pura (mismo giro horario, pozo interno y arrastre de marco) + fusión cromática cálida
+      if (bh.bgCaptured) bh.bgTime += dt;
+      const bgBaseLift = bh.bgCaptured ? Math.min(1, bh.bgTime / 0.35) : 1;
+      const exDamp = Math.exp(-0.8 * dt);
+      const proxOuter = rAccOuter * 1.45, proxInner = ehMin * 1.15;
+      const proxDen = Math.max(1, proxOuter - proxInner);
+      const innerSpan = Math.max(1, rInnerWell - ehMin);
+      const exX = this.exX, exY = this.exY, exVx = this.exVx, exVy = this.exVy;
+      const exR0 = this.exR0, exG0 = this.exG0, exB0 = this.exB0;
+      const exR = this.exR, exG = this.exG, exB = this.exB;
+      const exRnd = this.exRnd, exIsBg = this.exIsBg, exE = this.exE;
+      const bhX = bh.x, bhY = bh.y, ratioSm = bh.ratioSm;
+      let bgNear = 0, bgTotal = 0;
+
       for (let k = 0; k < this.extraCount; k++) {
-        if (!this.exActive[k]) continue;
-        let x = this.exX[k], y = this.exY[k], vx = this.exVx[k], vy = this.exVy[k];
+        let x = exX[k], y = exY[k], vx = exVx[k], vy = exVy[k];
         if (moved) {
           const distPrev = Math.hypot(x - prevX, y - prevY);
           let tD = (rAccOuter - distPrev) / dragDen;
@@ -908,60 +915,118 @@ export class ParticleSystem {
           const drag = tD * tD * (3 - 2 * tD) * 0.94;
           x += dBhX * drag; y += dBhY * drag;
         }
-        const dx = bh.x - x, dy = bh.y - y, d2 = dx * dx + dy * dy, d = Math.sqrt(d2) + 1e-4;
+        const dx = bhX - x, dy = bhY - y, d2 = dx * dx + dy * dy, d = Math.sqrt(d2) + 1e-4;
         const nx = dx / d, ny = dy / d, tx = -ny, ty = nx;
-        const rSlot = ehMin + 4 + Math.pow(this.exRnd[k], 2.1) * diskSpread;
-        const vTangTarget = vTangBase * Math.pow(ehMin / Math.max(d, ehMin), 0.15) * (0.85 + 0.3 * this.exRnd[k]);
+        const rn = exRnd[k];
+        const rSlot = ehMin + 3 + rn * rn * diskSpread;
+        const invR = ehMin / (d > ehMin ? d : ehMin);
+        const vTangTarget = vTangBase * (0.78 + 0.22 * Math.sqrt(invR)) * (0.86 + 0.28 * rn);
         const vt = vx * tx + vy * ty, vr = vx * nx + vy * ny;
+
+        let gLocal = gConst / (d2 + soft2);
+        if (d < rInnerWell) {
+          const uIn = 1 - (d - ehMin) / innerSpan;
+          if (uIn > 0) gLocal += (3800 + 2600 * ratioSm) * (uIn * uIn * uIn + 0.35 * uIn);
+        }
+
         let ax, ay;
         if (d > rSlot + 16) {
-          const vIn = 460 + 620 * bh.ratioSm + (gConst / (d2 + soft2)) * 0.12;
-          const pullR = (Math.min(2000, vIn) - vr) * 5.2;
-          const pullT = (vTangTarget * Math.min(1, (rAccOuter * 1.3) / Math.max(d, ehMin)) - vt) * 3.8;
+          const vIn = 340 + 580 * ratioSm + Math.sqrt(gLocal < 14000 ? gLocal : 14000) * 8.5;
+          const pullR = ((vIn < 1950 ? vIn : 1950) - vr) * 5.2 + (gLocal < 6000 ? gLocal : 6000) * 0.38;
+          const tAtt = (rAccOuter * 1.35) / (d > ehMin ? d : ehMin);
+          const pullT = (vTangTarget * (tAtt < 1 ? tAtt : 1) - vt) * 3.8;
           ax = nx * pullR + tx * pullT; ay = ny * pullR + ty * pullT;
         } else {
-          const pullR = (d - rSlot) * 28 - vr * 5.5;
-          const pullT = (vTangTarget - vt) * 7.2;
+          const pullR = (d - rSlot) * 28 - vr * 5.6;
+          const pullT = (vTangTarget - vt) * 7.4;
           ax = nx * pullR + tx * pullT; ay = ny * pullR + ty * pullT;
         }
-        vx = (vx + ax * dt) * Math.exp(-0.8 * dt); vy = (vy + ay * dt) * Math.exp(-0.8 * dt);
+        vx = (vx + ax * dt) * exDamp; vy = (vy + ay * dt) * exDamp;
+        const sp2 = vx * vx + vy * vy;
+        if (sp2 > 7.5e6) { const s = 2740 / Math.sqrt(sp2); vx *= s; vy *= s; }
         x += vx * dt; y += vy * dt;
-        const ox = x - bh.x, oy = y - bh.y, od = Math.hypot(ox, oy);
+
+        const ox = x - bhX, oy = y - bhY, od = Math.hypot(ox, oy);
         if (od < ehMin) {
-          const onx = od > 1e-4 ? ox / od : Math.cos(this.exRnd[k] * TWO_PI);
-          const ony = od > 1e-4 ? oy / od : Math.sin(this.exRnd[k] * TWO_PI);
-          x = bh.x + onx * ehMin; y = bh.y + ony * ehMin;
+          const onx = od > 1e-4 ? ox / od : Math.cos(rn * TWO_PI);
+          const ony = od > 1e-4 ? oy / od : Math.sin(rn * TWO_PI);
+          x = bhX + onx * ehMin; y = bhY + ony * ehMin;
           const vn = vx * onx + vy * ony; if (vn < 0) { vx -= onx * vn; vy -= ony * vn; }
         }
-        this.exX[k] = x; this.exY[k] = y; this.exVx[k] = vx; this.exVy[k] = vy;
-        this.exE[k] = Math.pow(Math.max(0, 1 - (d - ehMin) / (diskSpread * 1.25)), 1.6) * 0.72;
+        exX[k] = x; exY[k] = y; exVx[k] = vx; exVy[k] = vy;
+
+        // proximidad radial al horizonte + velocidad orbital → realce progresivo y fusión cromática cálida
+        let pt = (proxOuter - d) / proxDen;
+        pt = pt < 0 ? 0 : pt > 1 ? 1 : pt;
+        const prox = pt * pt * (3 - 2 * pt);
+        const spd = Math.sqrt(sp2);
+
+        if (exIsBg[k]) {
+          bgTotal++;
+          if (d < rAccOuter * 1.15) bgNear++;
+          // realce suave de brillo y saturación desde la opacidad tenue del fondo hasta nitidez de ALYSAURIO (~350 ms)
+          const lift = Math.min(1, bgBaseLift + Math.min(0.55, spd / 1100));
+          const r0 = exR0[k], g0 = exG0[k], b0 = exB0[k];
+          const avg = (r0 + g0 + b0) * 0.3333;
+          const sat = 1 + 0.38 * lift;
+          const bri = 0.44 + 0.68 * lift;
+          let cr = Math.min(1, Math.max(0, (avg + (r0 - avg) * sat) * bri));
+          let cg = Math.min(1, Math.max(0, (avg + (g0 - avg) * sat) * bri));
+          let cb = Math.min(1, Math.max(0, (avg + (b0 - avg) * sat) * bri));
+
+          // fusión cromática: color original → oro/ámbar suave (#FFE1B0 / #FFD28E) → blanco cálido (#FFF7EA → #FFFFFF)
+          const mixP = Math.min(1, prox + Math.min(0.20, spd / 2600) * prox);
+          if (mixP > 0.005) {
+            if (mixP < 0.55) {
+              const t1 = mixP / 0.55;
+              cr += (1.00 - cr) * t1; cg += (0.86 - cg) * t1; cb += (0.64 - cb) * t1;
+            } else {
+              const t2 = (mixP - 0.55) / 0.45;
+              // oro/ámbar suave → blanco cálido incandescente pegado al horizonte
+              const wr = 1.00, wg = 0.86 + (0.985 - 0.86) * t2, wb = 0.64 + (0.955 - 0.64) * t2;
+              cr = wr; cg = wg; cb = wb;
+            }
+          }
+          exR[k] = cr; exG[k] = cg; exB[k] = cb;
+        } else {
+          // textos HTML: blanco/gris limpio que se funde hacia blanco-cálido junto al horizonte
+          const tW = prox * 0.85;
+          exR[k] = exR0[k] + (1.0 - exR0[k]) * tW;
+          exG[k] = exG0[k] + (0.975 - exG0[k]) * tW;
+          exB[k] = exB0[k] + (0.92 - exB0[k]) * tW;
+        }
+        const eU = Math.max(0, 1 - (d - ehMin) / (diskSpread * 1.25));
+        exE[k] = eU * eU * 0.78;
       }
+
+      const warmTarget = bgTotal > 20 ? Math.min(1, (bgNear / Math.max(1, bgTotal * 0.35))) : 0;
+      bh.warm += (warmTarget - bh.warm) * (1 - Math.exp(-4 * dt));
     } else if (bh.releasing) {
       bh.relTime += dt;
       bh.ehVis = Math.max(0, bh.ehVis - dt * 520);
       bh.rim = Math.max(0, bh.rim - dt * 4.8);
-      // réplicas temporales se dispersan y se desvanecen suavemente mientras se restaura el fondo y los textos DOM
-      const fadeOut = Math.max(0, 1 - Math.max(0, bh.relTime - 0.10) / 0.44);
+      bh.warm = Math.max(0, bh.warm - dt * 2.5);
+      // réplicas temporales se dispersan y se disipan hacia sus orígenes mientras el fondo y textos vuelven limpiamente
+      const fadeOut = Math.max(0, 1 - Math.max(0, bh.relTime - 0.14) / 0.55);
+      const dkExpl = Math.pow(0.94, dt * 60), dkRet = Math.exp(-11 * dt), dkE = Math.exp(-4.5 * dt);
       for (let k = 0; k < this.extraCount; k++) {
-        if (!this.exActive[k]) continue;
         let x = this.exX[k], y = this.exY[k], vx = this.exVx[k], vy = this.exVy[k];
-        if (bh.relTime < 0.20) {
-          const dk = Math.pow(0.94, dt * 60);
-          vx *= dk; vy *= dk; x += vx * dt; y += vy * dt;
+        if (bh.relTime < 0.22) {
+          vx *= dkExpl; vy *= dkExpl; x += vx * dt; y += vy * dt;
         } else {
-          const ax = (this.exOx[k] - x) * 42, ay = (this.exOy[k] - y) * 42;
-          const dk = Math.exp(-12 * dt);
-          vx = (vx + ax * dt) * dk; vy = (vy + ay * dt) * dk;
+          const ax = (this.exOx[k] - x) * 38, ay = (this.exOy[k] - y) * 38;
+          vx = (vx + ax * dt) * dkRet; vy = (vy + ay * dt) * dkRet;
           x += vx * dt; y += vy * dt;
         }
         this.exX[k] = Math.max(-hW + 1, Math.min(hW - 1, x));
         this.exY[k] = Math.max(-hH + 1, Math.min(hH - 1, y));
         this.exVx[k] = vx; this.exVy[k] = vy;
-        this.exE[k] *= Math.exp(-4.5 * dt);
+        this.exE[k] *= dkE;
       }
       this._extraAlpha = fadeOut;
       if (bh.relTime >= 1.05) {
-        bh.releasing = false; bh.ehVis = 0; bh.rim = 0; this.extraCount = 0; this.heroNoBounce = false;
+        bh.releasing = false; bh.ehVis = 0; bh.rim = 0; bh.warm = 0; bh.bgCaptured = false;
+        this.extraCount = 0; this.heroNoBounce = false;
       }
     }
 
@@ -970,6 +1035,7 @@ export class ParticleSystem {
     u.uBhPos.value.set(hW + bh.x, hH + bh.y);
     u.uBhR.value = bh.ehVis;
     u.uBhRim.value = bh.rim;
+    u.uBhWarm.value = bh.warm;
   }
 
   /** cur: {x,y,px,py,vx,vy,speed,valid} coords centradas (y arriba), px/s */
@@ -992,6 +1058,7 @@ export class ParticleSystem {
     else {
       this.material.uniforms.uBhR.value = 0;
       this.material.uniforms.uBhRim.value = 0;
+      this.material.uniforms.uBhWarm.value = 0;
       this._extraAlpha = 0;
     }
 
@@ -1320,7 +1387,8 @@ export class ParticleSystem {
     const px = this.px, py = this.py, emerge = this.emerge;
 
     for (let i = 0; i < n; i++) {
-      const gx = (px[i] + hW) / cs, gy = (py[i] + hH) / cs, cx = Math.floor(gx), cy = Math.floor(gy);
+      // origen superior-izquierdo unificado con BG_FS y GRID_FS
+      const gx = (px[i] + hW) / cs, gy = (hH - py[i]) / cs, cx = Math.floor(gx), cy = Math.floor(gy);
       let sum = 0, q = 0;
       for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++, q++) {
         const dx = gx - (cx + ox + 0.5), dy = gy - (cy + oy + 0.5);
@@ -1336,26 +1404,21 @@ export class ParticleSystem {
       }
     }
 
-    // splat con kernel 3×3 a la MISMA escala ASCII que el fondo y ALYSAURIO (sin puntitos diminutos)
+    // splat directo O(N) de partículas capturadas 1:1 del fondo ASCII y textos HTML sobre la misma grilla fija
     const exN = this.extraCount, exA = this._extraAlpha || 0;
     if (exN > 0 && exA > 0.01) {
+      const invMs = exA / Math.max(massScale, 0.14);
+      const lift = this.bh.bgCaptured ? Math.min(1, this.bh.bgTime / 0.35) : 1;
+      const bgScale = (0.30 + 0.95 * lift) * invMs;
+      const txtScale = 0.85 * invMs;
+      const exX = this.exX, exY = this.exY, exR = this.exR, exG = this.exG, exB = this.exB;
+      const exLum = this.exLum, exE = this.exE, exIsBg = this.exIsBg;
       for (let k = 0; k < exN; k++) {
-        if (!this.exActive[k]) continue;
-        const gx = (this.exX[k] + hW) / cs, gy = (this.exY[k] + hH) / cs, cx = Math.floor(gx), cy = Math.floor(gy);
-        let sum = 0, q = 0;
-        for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++, q++) {
-          const dx = gx - (cx + ox + 0.5), dy = gy - (cy + oy + 0.5);
-          const w = Math.exp(-(dx * dx + dy * dy) * inv2s); w9[q] = w; sum += w;
-        }
-        const inv = (this.exW[k] * exA) / sum;
-        const r = this.exR[k], g = this.exG[k], b = this.exB[k], e = this.exE[k];
-        q = 0;
-        for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++, q++) {
-          const xx = cx + ox, yy = cy + oy;
-          if (xx < 0 || yy < 0 || xx >= gw || yy >= gh) continue;
-          const w = w9[q] * inv, gi = yy * gw + xx;
-          Dm[gi] += w; Dr[gi] += w * r; Dg[gi] += w * g; Db[gi] += w * b; De[gi] += w * e;
-        }
+        const cx = Math.floor((exX[k] + hW) / cs), cy = Math.floor((hH - exY[k]) / cs);
+        if (cx < 0 || cy < 0 || cx >= gw || cy >= gh) continue;
+        const w = exIsBg[k] ? (exLum[k] * bgScale) : (exLum[k] * txtScale);
+        const gi = cy * gw + cx;
+        Dm[gi] += w; Dr[gi] += w * exR[k]; Dg[gi] += w * exG[k]; Db[gi] += w * exB[k]; De[gi] += w * exE[k];
       }
     }
 
@@ -1372,7 +1435,7 @@ export class ParticleSystem {
       const amp = 0.2 + 0.6 * (1 - Math.min(1, L));
       L *= 1 - amp * (1 - hs) * 0.6;
       if (boxOn) {
-        const wx = ((gi % gw) + 0.5) * cs - hW - S.bx, wy = (((gi / gw) | 0) + 0.5) * cs - hH - S.by;
+        const wx = ((gi % gw) + 0.5) * cs - hW - S.bx, wy = hH - (((gi / gw) | 0) + 0.5) * cs - S.by;
         const qx = Math.abs(wx) - S.bhw + S.bcr, qy = Math.abs(wy) - S.bhh + S.bcr;
         const mx = qx > 0 ? qx : 0, my = qy > 0 ? qy : 0;
         const sd0 = Math.sqrt(mx * mx + my * my) + Math.min(Math.max(qx, qy), 0) - S.bcr;
