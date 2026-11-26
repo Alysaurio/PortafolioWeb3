@@ -53,6 +53,46 @@ body.bh-hide-dom #scroll-hint {
   50% { color: rgb(154, 154, 154); }
 }
 
+/* Reflejo perlado y micro-aberración óptica sutil exclusivos de la portada (Sección 1: HERO_TEXT) */
+body[data-state="HERO_TEXT"] #hero-sub,
+body[data-state="HERO_TEXT"] #scroll-hint {
+  background-image: linear-gradient(
+    105deg,
+    #F2F2F2 0%,
+    #F2F2F2 22%,
+    #B8ECFF 36%,
+    #F2F2F2 50%,
+    #FFE4B8 64%,
+    #D8D0FF 78%,
+    #F2F2F2 92%,
+    #F2F2F2 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: hero-pearl 10.5s linear infinite, hero-chroma-shadow 10.5s ease-in-out infinite;
+}
+body[data-state="HERO_TEXT"] #scroll-hint {
+  animation: hero-pearl 10.5s linear infinite, hero-chroma-shadow 10.5s ease-in-out infinite, hero-hint-breath 2.4s ease-in-out infinite;
+}
+@keyframes hero-pearl {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+@keyframes hero-chroma-shadow {
+  0%, 100% {
+    text-shadow: -0.6px 0 0.6px rgba(135, 228, 255, .20), 0.6px 0 0.6px rgba(255, 190, 140, .19);
+  }
+  50% {
+    text-shadow: 0.6px 0 0.6px rgba(135, 228, 255, .18), -0.6px 0 0.6px rgba(255, 178, 150, .20);
+  }
+}
+@keyframes hero-hint-breath {
+  0%, 100% { filter: brightness(.72); }
+  50%      { filter: brightness(1.06); }
+}
+
 /* ---------- PREVIEW TITLE ---------- */
 #preview-title {
   position: fixed; left: 0; top: 0; z-index: 6; pointer-events: none; opacity: 0;

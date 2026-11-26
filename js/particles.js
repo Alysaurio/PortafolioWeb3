@@ -281,6 +281,60 @@ function arcColor(S, x, y) {
   oR = r; oG = g; oB = b;
 }
 
+/* ---------- Dispersión cromática óptica estilo "Creation by Silexars" y paleta ígnea de cuerpo negro ---------- */
+let sxR = 1, sxG = 1, sxB = 1, sxCrest = 0;
+function evalSilexars(nx, ny, t) {
+  const tt = t * 0.45;
+  const px = nx * 1.15, py = ny * 0.85;
+  const r = Math.hypot(px, py) + 1e-4;
+  const ring = (Math.sin(tt * 0.75) + 1.0) * 0.24;
+  // 3 canales con pequeño desfase óptico RGB (análogo a z += 0.07)
+  const wR = Math.abs(Math.sin(r * 2.8 - tt * 1.45));
+  const wG = Math.abs(Math.sin(r * 2.8 - (tt + 0.07) * 1.45));
+  const wB = Math.abs(Math.sin(r * 2.8 - (tt + 0.14) * 1.45));
+  const phiBase = px * 2.1 - py * 1.4 + tt * 0.95 + Math.sin(px * 1.3 + py * 1.7 - tt * 0.6) * 0.65;
+  const phiR = phiBase + ring * wR * 2.4;
+  const phiG = phiBase + 0.62 + ring * wG * 2.4;
+  const phiB = phiBase + 1.28 + ring * wB * 2.4;
+  let pr = 0.54 + 0.44 * Math.sin(phiR) + 0.09 * Math.sin(phiR * 2.0 + 0.6);
+  let pg = 0.52 + 0.38 * Math.sin(phiG);
+  let pb = 0.56 + 0.42 * Math.sin(phiB);
+  pr = pr < 0.14 ? 0.14 : pr > 1 ? 1 : pr;
+  pg = pg < 0.14 ? 0.14 : pg > 1 ? 1 : pg;
+  pb = pb < 0.14 ? 0.14 : pb > 1 ? 1 : pb;
+  const peak = pr > pg ? (pr > pb ? pr : pb) : (pg > pb ? pg : pb);
+  const lift = 0.97 / (peak > 0.35 ? peak : 0.35);
+  sxR = pr * lift; if (sxR > 1) sxR = 1;
+  sxG = pg * lift; if (sxG > 1) sxG = 1;
+  sxB = pb * lift; if (sxB > 1) sxB = 1;
+  sxCrest = (wR + wG + wB) * 0.3333;
+}
+
+// rampa de fuego de cuerpo negro: #8A1C0A → #D93B14 → #FF6414 → #FFA826 → #FFE7A8 → #FFF7E6 → #FFFFFF
+let fiR = 1, fiG = 1, fiB = 1;
+function evalFire(h) {
+  h = h < 0 ? 0 : h > 1 ? 1 : h;
+  if (h < 0.35) {
+    const u = h / 0.35;
+    fiR = 0.541 + (0.851 - 0.541) * u; fiG = 0.110 + (0.231 - 0.110) * u; fiB = 0.039 + (0.078 - 0.039) * u;
+  } else if (h < 0.54) {
+    const u = (h - 0.35) / 0.19;
+    fiR = 0.851 + (1.000 - 0.851) * u; fiG = 0.231 + (0.392 - 0.231) * u; fiB = 0.078;
+  } else if (h < 0.72) {
+    const u = (h - 0.54) / 0.18;
+    fiR = 1.000; fiG = 0.392 + (0.659 - 0.392) * u; fiB = 0.078 + (0.149 - 0.078) * u;
+  } else if (h < 0.86) {
+    const u = (h - 0.72) / 0.14;
+    fiR = 1.000; fiG = 0.659 + (0.906 - 0.659) * u; fiB = 0.149 + (0.659 - 0.149) * u;
+  } else if (h < 0.94) {
+    const u = (h - 0.86) / 0.08;
+    fiR = 1.000; fiG = 0.906 + (0.969 - 0.906) * u; fiB = 0.659 + (0.902 - 0.659) * u;
+  } else {
+    const u = (h - 0.94) / 0.06;
+    fiR = 1.000; fiG = 0.969 + (1.000 - 0.969) * u; fiB = 0.902 + (1.000 - 0.902) * u;
+  }
+}
+
 function propagate(mask, gw, gh) {
   const nx = new Int16Array(gw * gh).fill(-1), ny = new Int16Array(gw * gh).fill(-1);
   for (let i = 0; i < mask.length; i++) if (mask[i]) { nx[i] = i % gw; ny[i] = (i / gw) | 0; }
@@ -326,6 +380,8 @@ export class ParticleSystem {
     this.emerge = new Float32Array(n).fill(1);
     this.puff = new Float32Array(n);         // factor de expansión volumétrica de humo [0..1] (1.0 → ~2.45 celdas)
     this.bhPulled = new Uint8Array(n);       // partículas de ALYSAURIO ya desprendidas por el agujero negro
+    this.bhTemp = new Float32Array(n);       // factor térmico [0..1] para rampa ígnea y enfriamiento suave al soltar
+    this.heroModeSm = 1;                     // suavizado [0..1] para equilibrio núcleo-blanco / borde-prismático en HERO_TEXT
     this.hasTarget = new Uint8Array(n);
     this.clusterFlight = new Uint8Array(n);  // micro-cúmulo regenerativo en vuelo (cohesión XSPH + leve curvatura)
     this.clusterCurve = new Float32Array(n);
@@ -546,6 +602,7 @@ export class ParticleSystem {
     bh.ehR = C.bhEhMin; bh.ehVis = 4; bh.rim = 0.55; bh.warm = 0;
     this.heroNoBounce = false;
     this.bhPulled.fill(0);
+    this.bhTemp.fill(0);
     this.extraCount = 0;
   }
 
@@ -958,6 +1015,8 @@ export class ParticleSystem {
       const diskSpread = 52 + bh.ratioSm * 42;
       const vTangBase = 410 + 490 * (0.25 + 0.75 * bh.ratioSm);
       const dragDen = Math.max(1, rAccOuter - ehMin * 1.15);
+      const sxHalfW = Math.max(220, this.textHalfW * 1.15), sxHalfH = Math.max(90, this.H * 0.22);
+      const tNow = this.S.time, bhTemp = this.bhTemp;
 
       for (let i = 0; i < n; i++) {
         let x = px[i], y = py[i], vx = vxA[i], vy = vyA[i];
@@ -988,7 +1047,15 @@ export class ParticleSystem {
           } else {
             vx *= Math.exp(-12 * dt); vy *= Math.exp(-12 * dt);
             vxA[i] = vx; vyA[i] = vy;
-            this.cr[i] = this.cg[i] = this.cb[i] = 1;
+            // letras aún intactas conservan la dispersión óptica estilo Silexars (núcleo blanco + bordes prismáticos)
+            this._textEval(x, y);
+            evalSilexars(x / sxHalfW, y / sxHalfH, tNow);
+            let cw = (-tSd - 2.0) / 11.0; cw = cw < 0 ? 0 : cw > 1 ? 1 : cw; cw = cw * cw * (3 - 2 * cw);
+            const chroma = (0.52 + 0.11 * sxCrest) * (1 - cw) + 0.21 * cw;
+            this.cr[i] = 0.949 + (sxR - 0.949) * chroma;
+            this.cg[i] = 0.957 + (sxG - 0.957) * chroma;
+            this.cb[i] = 0.973 + (sxB - 0.973) * chroma;
+            bhTemp[i] = 0;
             this.en[i] = Math.max(0, this.en[i] - dt * 3);
             continue;
           }
@@ -1038,11 +1105,30 @@ export class ParticleSystem {
         }
         x = Math.max(-hW + 1, Math.min(hW - 1, x)); y = Math.max(-hH + 1, Math.min(hH - 1, y));
         px[i] = x; py[i] = y; vxA[i] = vx; vyA[i] = vy;
-        // sutil reflejo cálido-blanco en ALYSAURIO cuando el fondo se mezcla en el disco de acreción
+        // paleta ígnea de cuerpo negro modulada por ondas tipo Silexars (brasa → naranja/ámbar → oro → blanco-fuego)
+        const spdNow = Math.sqrt(sp2);
+        const proxRad = Math.pow(Math.max(0, 1 - (d - ehMin) / Math.max(1, diskSpread * 1.48)), 1.25);
+        const spdF = Math.min(1, spdNow / 2150);
+        evalSilexars((x - bh.x) / 180, (y - bh.y) / 180, tNow * 1.45);
+        const flickW = (sxCrest - 0.5) * 0.18;
+        let th = proxRad * 0.78 + spdF * 0.28 + flickW;
+        th = th < 0 ? 0 : th > 1 ? 1 : th;
+        bhTemp[i] = th;
+        evalFire(th);
+        let fr = fiR, fg = fiG, fb = fiB;
+        if (th < 0.35) {
+          // chispas sutiles del color prismático original en las partículas recién desprendidas
+          const spk = (1 - th / 0.35) * 0.24 * (0.55 + 0.45 * sxCrest);
+          fr += (sxR - fr) * spk; fg += (sxG - fg) * spk; fb += (sxB - fb) * spk;
+        } else if (th < 0.74 && sxCrest > 0.60 && spdF > 0.40) {
+          // breves destellos de dispersión cálida en las crestas rápidas del disco intermedio
+          const glt = (sxCrest - 0.60) * 0.34 * spdF;
+          const sr = Math.min(1, sxR * 1.12), sg = sxG * 0.90, sb = sxB * 0.68;
+          fr += (sr - fr) * glt; fg += (sg - fg) * glt; fb += (sb - fb) * glt;
+        }
+        this.cr[i] = fr; this.cg[i] = fg; this.cb[i] = fb;
         const eRad = Math.pow(Math.max(0, 1 - (d - ehMin) / (diskSpread * 1.15)), 1.55);
-        const wMix = bh.warm * eRad * 0.22;
-        this.cr[i] = 1; this.cg[i] = 1 - 0.06 * wMix; this.cb[i] = 1 - 0.16 * wMix;
-        this.en[i] = Math.min(1, Math.max(eRad, Math.sqrt(sp2) / 3400 * 0.45));
+        this.en[i] = Math.min(1, Math.max(eRad, spdNow / 3400 * 0.45));
       }
 
       // física gravitacional O(N) pura (mismo giro horario, pozo interno y arrastre de marco) + fusión cromática cálida
@@ -1108,11 +1194,12 @@ export class ParticleSystem {
         }
         exX[k] = x; exY[k] = y; exVx[k] = vx; exVy[k] = vy;
 
-        // proximidad radial al horizonte + velocidad orbital → realce progresivo y fusión cromática cálida
+        // proximidad radial al horizonte + velocidad orbital → paleta ígnea de cuerpo negro modulada por onda Silexars
         let pt = (proxOuter - d) / proxDen;
         pt = pt < 0 ? 0 : pt > 1 ? 1 : pt;
         const prox = pt * pt * (3 - 2 * pt);
         const spd = Math.sqrt(sp2);
+        const waveMod = 0.5 + 0.5 * Math.sin((x - bhX) * 0.018 - (y - bhY) * 0.015 + tNow * 1.9 + rn * 2.4);
 
         if (exIsBg[k]) {
           bgTotal++;
@@ -1127,26 +1214,26 @@ export class ParticleSystem {
           let cg = Math.min(1, Math.max(0, (avg + (g0 - avg) * sat) * bri));
           let cb = Math.min(1, Math.max(0, (avg + (b0 - avg) * sat) * bri));
 
-          // fusión cromática: color original → oro/ámbar suave (#FFE1B0 / #FFD28E) → blanco cálido (#FFF7EA → #FFFFFF)
-          const mixP = Math.min(1, prox + Math.min(0.20, spd / 2600) * prox);
-          if (mixP > 0.005) {
-            if (mixP < 0.55) {
-              const t1 = mixP / 0.55;
-              cr += (1.00 - cr) * t1; cg += (0.86 - cg) * t1; cb += (0.64 - cb) * t1;
-            } else {
-              const t2 = (mixP - 0.55) / 0.45;
-              // oro/ámbar suave → blanco cálido incandescente pegado al horizonte
-              const wr = 1.00, wg = 0.86 + (0.985 - 0.86) * t2, wb = 0.64 + (0.955 - 0.64) * t2;
-              cr = wr; cg = wg; cb = wb;
-            }
+          // conserva colores reales del vídeo afuera y se funde suavemente hacia la paleta de fuego al caer al disco
+          const mixP = Math.min(1, prox + Math.min(0.22, spd / 2500) * prox);
+          if (mixP > 0.02) {
+            let mt = (mixP - 0.02) / 0.84; mt = mt < 0 ? 0 : mt > 1 ? 1 : mt;
+            const fm = mt * mt * (3 - 2 * mt);
+            let bgTh = prox * 0.84 + Math.min(1, spd / 2400) * 0.22 + (waveMod - 0.5) * 0.14;
+            bgTh = bgTh < 0 ? 0 : bgTh > 1 ? 1 : bgTh;
+            evalFire(bgTh);
+            cr += (fiR - cr) * fm; cg += (fiG - cg) * fm; cb += (fiB - cb) * fm;
           }
           exR[k] = cr; exG[k] = cg; exB[k] = cb;
         } else {
-          // textos HTML: blanco/gris limpio que se funde hacia blanco-cálido junto al horizonte
-          const tW = prox * 0.85;
-          exR[k] = exR0[k] + (1.0 - exR0[k]) * tW;
-          exG[k] = exG0[k] + (0.975 - exG0[k]) * tW;
-          exB[k] = exB0[k] + (0.92 - exB0[k]) * tW;
+          // textos HTML capturados: ignición térmica progresiva (brasa → naranja/ámbar → blanco-fuego en el horizonte)
+          let tTh = prox * 0.78 + Math.min(1, spd / 2200) * 0.28 + (waveMod - 0.5) * 0.14;
+          tTh = tTh < 0 ? 0 : tTh > 1 ? 1 : tTh;
+          let fm = (tTh - 0.04) / 0.32; fm = fm < 0 ? 0 : fm > 1 ? 1 : fm; fm = fm * fm * (3 - 2 * fm);
+          evalFire(tTh);
+          exR[k] = exR0[k] + (fiR - exR0[k]) * fm;
+          exG[k] = exG0[k] + (fiG - exG0[k]) * fm;
+          exB[k] = exB0[k] + (fiB - exB0[k]) * fm;
         }
         const eU = Math.max(0, 1 - (d - ehMin) / (diskSpread * 1.25));
         exE[k] = eU * eU * 0.78;
@@ -1175,6 +1262,11 @@ export class ParticleSystem {
         this.exY[k] = Math.max(-hH + 1, Math.min(hH - 1, y));
         this.exVx[k] = vx; this.exVy[k] = vy;
         this.exE[k] *= dkE;
+        // enfriamiento progresivo de las réplicas hacia su color original durante la dispersión
+        const cCool = 1 - Math.exp(-3.6 * dt);
+        this.exR[k] += (this.exR0[k] - this.exR[k]) * cCool;
+        this.exG[k] += (this.exG0[k] - this.exG[k]) * cCool;
+        this.exB[k] += (this.exB0[k] - this.exB[k]) * cCool;
       }
       this._extraAlpha = fadeOut;
       if (bh.relTime >= 1.05) {
@@ -1200,6 +1292,7 @@ export class ParticleSystem {
 
     // si el agujero negro está activo en HERO_TEXT, toma el control físico completo
     if (this.bh.active) {
+      this.heroModeSm += (0 - this.heroModeSm) * (1 - Math.exp(-8 * dt));
       this._extraAlpha = 1;
       this._updateBlackHole(dt, cur);
       const area = this._area();
@@ -1207,6 +1300,8 @@ export class ParticleSystem {
       this._splat(t, this.areaSm / (cs * cs * n) * C.fill);
       return;
     }
+    const heroTargetSm = (S.mode === 0 && (!this.bh.releasing || this.bh.relTime > 0.32)) ? 1 : 0;
+    this.heroModeSm += (heroTargetSm - this.heroModeSm) * (1 - Math.exp(-7 * dt));
     if (this.bh.releasing) this._updateBlackHole(dt, cur);
     else {
       this.material.uniforms.uBhR.value = 0;
@@ -1290,6 +1385,8 @@ export class ParticleSystem {
     const mg = C.edgeMargin, EF = C.edgeForce, inset = C.inset, arrR = C.arrivalRadius;
     const local = S.local, isDetail = S.isDetail && S.boxOn;
     const aritoBarrier = !isDetail && S.boxOn && S.vidR > 1;
+    const sxHalfW = Math.max(220, this.textHalfW * 1.15), sxHalfH = Math.max(90, H * 0.22);
+    const bhTemp = this.bhTemp, heroCk = 1 - Math.exp(-7.5 * dt);
     const pt = this._pt;
 
     for (let i = 0; i < n; i++) {
@@ -1378,9 +1475,9 @@ export class ParticleSystem {
         const ny = om * om * this.fy0[i] + 2 * om * e * this.fy1[i] + e * e * this.fy2[i];
         vx = (nx - x) / Math.max(dt, 1e-3); vy = (ny - y) / Math.max(dt, 1e-3);
         x = nx; y = ny;
-        if (s > 0.35) {
+        if (s > 0.16) {
           arcColor(S, txA[i], tyA[i]);
-          const ck = 1 - Math.exp(-dt * 8);
+          const ck = 1 - Math.exp(-dt * 7.5);
           ccr[i] += (oR - ccr[i]) * ck; ccg[i] += (oG - ccg[i]) * ck; ccb[i] += (oB - ccb[i]) * ck;
         }
         if (s >= 1) { ph = 3; hasT[i] = 0; heat[i] = 0.85; arrived[i] = 0; settle[i] = C.settleTime; }
@@ -1392,6 +1489,14 @@ export class ParticleSystem {
         const dx = (this.bdx[i] - x) * k, dy = (this.bdy[i] - y) * k;
         x += dx; y += dy; vx = dx / dt * 0.5; vy = dy / dt * 0.5;
         timer[i] -= dt;
+        if (bhTemp[i] > 0) {
+          bhTemp[i] = Math.max(0, bhTemp[i] - dt * 1.25);
+          evalFire(bhTemp[i]);
+          const wCool = bhTemp[i] > 0.01 ? Math.min(1, bhTemp[i] * 1.35) : 0;
+          evalSilexars(x / sxHalfW, y / sxHalfH, t);
+          const tr = 0.949 + (sxR - 0.949) * 0.42, tg = 0.957 + (sxG - 0.957) * 0.42, tb = 0.973 + (sxB - 0.973) * 0.42;
+          ccr[i] = tr + (fiR - tr) * wCool; ccg[i] = tg + (fiG - tg) * wCool; ccb[i] = tb + (fiB - tb) * wCool;
+        }
         if (timer[i] <= 0) { ph = 2; timer[i] = C.apexDelayMs / 1000 * (0.75 + rnd[i] * 0.4); }
         px[i] = x; py[i] = y; vxA[i] = vx; vyA[i] = vy; phase[i] = ph;
         en[i] = Math.min(1, Math.hypot(vx, vy) / 2200) * 0.6;
@@ -1507,7 +1612,26 @@ export class ParticleSystem {
             }
             ccr[i] = rr; ccg[i] = gg; ccb[i] = bb;
           } else if (comp === 3) { ccr[i] = 0.9; ccg[i] = 0.9; ccb[i] = 0.92; }
-          else if (comp === 4) { ccr[i] = ccg[i] = ccb[i] = 1; }
+          else if (comp === 4) {
+            // dispersión cromática óptica estilo Silexars en HERO_TEXT (núcleo blanco #F2F4F8 + bordes prismáticos)
+            const rxC = (ph === 3 && hasT[i]) ? txA[i] : x;
+            const ryC = (ph === 3 && hasT[i]) ? tyA[i] : y;
+            evalSilexars(rxC / sxHalfW, ryC / sxHalfH, t);
+            let cw = 0.35;
+            if (ph === 0) { cw = (-sd - 2.0) / 11.0; cw = cw < 0 ? 0 : cw > 1 ? 1 : cw; cw = cw * cw * (3 - 2 * cw); }
+            const chroma = (0.52 + 0.11 * sxCrest) * (1 - cw) + 0.21 * cw;
+            let tr = 0.949 + (sxR - 0.949) * chroma;
+            let tg = 0.957 + (sxG - 0.957) * chroma;
+            let tb = 0.973 + (sxB - 0.973) * chroma;
+            if (bhTemp[i] > 0) {
+              bhTemp[i] = Math.max(0, bhTemp[i] - dt * 1.45);
+              evalFire(bhTemp[i]);
+              const wCool = Math.min(1, bhTemp[i] * 1.35);
+              tr += (fiR - tr) * wCool; tg += (fiG - tg) * wCool; tb += (fiB - tb) * wCool;
+            }
+            if (ph === 0 && bhTemp[i] === 0) { ccr[i] = tr; ccg[i] = tg; ccb[i] = tb; }
+            else { ccr[i] += (tr - ccr[i]) * heroCk; ccg[i] += (tg - ccg[i]) * heroCk; ccb[i] += (tb - ccb[i]) * heroCk; }
+          }
         }
 
         if (ph === 0) {
@@ -1698,6 +1822,8 @@ export class ParticleSystem {
     const flick = (t * (7 + 48 * ch * ch)) | 0;
     const boxOn = S.boxOn && S.boxD > 0.001;
     const bandW = Math.max(1, 2 * S.brb);
+    const heroSm = this.heroModeSm;
+    const bhFireMul = this.bh.active ? 0.30 : (this.bh.releasing ? (0.30 + 1.05 * Math.min(1, this.bh.relTime / 0.85)) : 1.35);
 
     for (let gi = 0; gi < size; gi++) {
       const m = Dm[gi], o = gi * 4;
@@ -1736,10 +1862,19 @@ export class ParticleSystem {
       let gl = Math.pow(f, 0.85) * 8.99 + E * 1.5 + (ch > 0.005 ? ch * (1.6 + 2.6 * hs) : 0);
       if (gl > 8.99) gl = 8.99;
       let al = (L - 0.03) / 0.19; al = al < 0 ? 0 : al > 1 ? 1 : al; al = al * al * (3 - 2 * al);
-      const white = Math.min(1, Math.max(E * 1.35, flash));
-      out[o] = Dr[gi] * inv + (1 - Dr[gi] * inv) * white;
-      out[o + 1] = Dg[gi] * inv + (1 - Dg[gi] * inv) * white;
-      out[o + 2] = Db[gi] * inv + (1 - Db[gi] * inv) * white;
+      const white = Math.min(1, Math.max(E * bhFireMul, flash));
+      let rr = Dr[gi] * inv + (1 - Dr[gi] * inv) * white;
+      let gg = Dg[gi] * inv + (1 - Dg[gi] * inv) * white;
+      let bb = Db[gi] * inv + (1 - Db[gi] * inv) * white;
+      if (heroSm > 0.005) {
+        // refuerza contraste núcleo blanco (# % @) vs bordes prismáticos (. : ; = + x) en HERO_TEXT en reposo
+        let gt = (gl - 4.6) / 2.4; gt = gt < 0 ? 0 : gt > 1 ? 1 : gt; gt = gt * gt * (3 - 2 * gt);
+        const coreLift = gt * 0.24 * heroSm;
+        rr += (0.949 - rr) * coreLift;
+        gg += (0.957 - gg) * coreLift;
+        bb += (0.973 - bb) * coreLift;
+      }
+      out[o] = rr; out[o + 1] = gg; out[o + 2] = bb;
       out[o + 3] = Math.floor(gl) + al * 0.99;
     }
     this.gridTex.needsUpdate = true;

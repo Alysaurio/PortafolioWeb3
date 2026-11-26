@@ -71,11 +71,17 @@ void main(){
 
   if (uBhR > 0.5) {
     float db = length(frag - uBhPos);
-    // núcleo negro puro (#000000) con halo radial suave y amplio hacia afuera (R_horizon → R_horizon * 1.48)
+    // núcleo negro puro (#000000) con halo ígneo suave: blanco-cálido interior fundiéndose en ámbar/naranja fuego hacia afuera
     float hole = 1.0 - smoothstep(uBhR * 0.90, uBhR * 1.06, db);
-    float haloT = clamp((db - uBhR * 0.95) / max(uBhR * 0.54, 7.0), 0.0, 1.0);
-    float halo = pow(1.0 - haloT, 2.2) * smoothstep(uBhR * 0.82, uBhR * 1.04, db) * uBhRim * 0.52;
-    vec3 haloCol = mix(vec3(1.0), vec3(1.0, 0.91, 0.76), uBhWarm * 0.65);
+    float haloT = clamp((db - uBhR * 0.94) / max(uBhR * 0.68, 9.0), 0.0, 1.0);
+    float halo = pow(1.0 - haloT, 2.0) * smoothstep(uBhR * 0.82, uBhR * 1.04, db) * uBhRim * 0.62;
+    vec3 innerFire = vec3(1.0, 0.97, 0.88);
+    vec3 midFire   = vec3(1.0, 0.58, 0.15);
+    vec3 outerFire = vec3(0.88, 0.24, 0.06);
+    vec3 haloCol = haloT < 0.36
+      ? mix(innerFire, midFire, smoothstep(0.0, 0.36, haloT))
+      : mix(midFire, outerFire, smoothstep(0.36, 1.0, haloT));
+    haloCol = mix(haloCol, vec3(1.0, 0.93, 0.78), (1.0 - haloT) * uBhWarm * 0.25);
     if (hole > 0.004 || halo > 0.006) {
       vec3 gRgb = col * a;
       vec3 outRgb = mix(gRgb + haloCol * halo, vec3(0.0), hole);
