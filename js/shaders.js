@@ -1,4 +1,4 @@
-// shaders.js — atlas tipográfico + GLSL: capa ASCII de grilla fija, fondo ASCII de vídeo y caja de vídeo con escáner micro-ASCII.
+// shaders.js — atlas tipográfico + GLSL: capa ASCII de grilla fija, fondo ASCII de vídeo y caja de vídeo con escáner graduado.
 export const DEFAULT_CHARSET = ['.', ':', ';', '=', '+', 'x', '#', '%', '@'];
 export const ATLAS_CELL = 48;
 
@@ -96,7 +96,8 @@ void main(){
   gl_FragColor = vec4(col, 1.0);
 }`;
 
-/* Caja de vídeo (arito / rectángulo): apertura micro-ASCII → vídeo y escáner micro-ASCII técnico radial. */
+/* Caja de vídeo (arito / rectángulo): apertura micro-ASCII → vídeo y escáner ASCII graduado
+   (micro-caracteres densos ~3.6 px en el borde exterior → transición intermedia ~5.2 px → núcleo igual a uGridCell ~7 px). */
 export const BOX_FS = /* glsl */`
 ${COMMON}
 uniform sampler2D tVideo;
@@ -109,6 +110,7 @@ uniform float uVAspect;
 uniform vec2 uMagPos;
 uniform float uMagR;
 uniform float uPulse;
+uniform float uGridCell;    // iguala PHYSICS_CONFIG.cellSize (~7 px) en el núcleo de la lupa
 uniform float uDpr;
 uniform float uTime;
 uniform float uAlpha;
@@ -126,12 +128,12 @@ vec4 asciiSample(vec2 frag, vec2 origin, float cs, float boost){
   vec2 cell = floor(rel / cs);
   vec3 c = vid(origin + (cell + 0.5) * cs);
   float lum = dot(c, vec3(0.299, 0.587, 0.114));
-  lum = clamp((lum - 0.03) * 1.3, 0.0, 1.0);
-  float gf = pow(lum, 0.85) * 8.99 + boost * (0.6 + hash12(cell + floor(uTime * 12.0)));
+  lum = clamp((lum - 0.03) * 1.32, 0.0, 1.0);
+  float gf = pow(lum, 0.85) * 8.99 + boost * (0.55 + hash12(cell + floor(uTime * 12.0)));
   float g = floor(clamp(gf, 0.0, 8.99));
   float a = glyphAlpha(g, fract(rel / cs), cs * uDpr);
-  float dense = step(5.5, g);                                   // # % @ → realce fósforo
-  vec3 gc = c * (1.12 + 0.30 * dense) + dense * vec3(0.015, 0.07, 0.03);
+  float dense = step(5.5, g);                                   // # % @ → sutil realce fósforo
+  vec3 gc = c * (1.12 + 0.28 * dense) + dense * vec3(0.015, 0.06, 0.025);
   return vec4(gc, a);
 }
 
@@ -146,24 +148,54 @@ void main(){
 
   // apertura: micro-caracteres técnicos que se disuelven celda a celda hasta el vídeo nítido
   if (uMosaic > 0.002) {
-    vec2 cell = floor((frag - origin) / 5.0);
+    vec2 cell = floor((frag - origin) / 4.5);
     float r = hash12(cell);
     float amt = smoothstep(r * 0.55, r * 0.55 + 0.45, uMosaic);
-    vec4 s = asciiSample(frag, origin, 5.0, 0.0);
+    vec4 s = asciiSample(frag, origin, 4.5, 0.0);
     col = mix(col, mix(vec3(0.07), s.rgb, s.a), amt);
   }
 
-  // escáner micro-ASCII radial (máscara orgánica continua, sin anillos ni bloques)
+  // escáner ASCII graduado hacia el cursor:
+  // borde exterior (~3.6 px denso) → transición intermedia (~5.2 px) → núcleo (~uGridCell = 7 px, igual al marco exterior)
   if (uMagR > 1.0) {
     vec2 dv = frag - uMagPos;
     float d = length(dv), ang = atan(dv.y, dv.x);
     float n = 0.5 * sin(ang * 7.0 + uTime * 1.7) + 0.5 * sin(ang * 13.0 - uTime * 2.3);
-    float scan = 0.5 + 0.5 * sin(ang * 40.0 + uTime * 6.0);
-    float Rn = uMagR * (1.0 + 0.07 * n + 0.025 * scan);
-    float w = pow(1.0 - smoothstep(0.22 * Rn, Rn, d), 1.3);
-    vec4 s = asciiSample(frag, origin, 4.5, uPulse * (1.0 + 0.4 * sin(uTime * 18.0 - d * 0.12)));
-    vec3 base = col * (1.0 - 0.22 * w);                         // celda apenas oscurecida, nunca un círculo opaco
-    col = mix(base, s.rgb, clamp(s.a * w * 1.1, 0.0, 1.0));
+    float scan = 0.5 + 0.5 * sin(ang * 36.0 + uTime * 5.2);
+    float Rn = uMagR * (1.0 + 0.065 * n + 0.02 * scan);
+    float rNorm = clamp(d / max(Rn, 1.0), 0.0, 1.0);
+    float wEnv = pow(1.0 - smoothstep(0.42, 1.0, rNorm), 1.15);
+
+    if (wEnv > 0.002) {
+      float boost = uPulse * (0.9 + 0.35 * sin(uTime * 18.0 - d * 0.11));
+      // pesos armónicos entre 3 grillas fijas en espacio del vídeo (cero vibración al mover el cursor)
+      float wCore = 1.0 - smoothstep(0.20, 0.48, rNorm);        // núcleo cercano al cursor: celda = uGridCell (~7 px)
+      float wOuter = smoothstep(0.50, 0.80, rNorm);             // borde exterior: micro-caracteres (~3.6 px)
+      float wMid = max(0.0, 1.0 - wCore - wOuter);              // transición intermedia (~5.2 px)
+
+      float csCore = max(uGridCell, 5.0);
+      float csMid  = csCore * 0.74;
+      float csOut  = max(3.5, csCore * 0.51);
+
+      vec3 gColSum = vec3(0.0);
+      float gAlp = 0.0;
+      if (wCore > 0.001) {
+        vec4 s2 = asciiSample(frag, origin, csCore, boost);
+        gColSum += s2.rgb * s2.a * wCore; gAlp += s2.a * wCore;
+      }
+      if (wMid > 0.001) {
+        vec4 s1 = asciiSample(frag, origin, csMid, boost * 0.85);
+        gColSum += s1.rgb * s1.a * wMid; gAlp += s1.a * wMid;
+      }
+      if (wOuter > 0.001) {
+        vec4 s0 = asciiSample(frag, origin, csOut, boost * 0.65);
+        gColSum += s0.rgb * s0.a * wOuter; gAlp += s0.a * wOuter;
+      }
+      vec3 gCol = gAlp > 0.001 ? gColSum / gAlp : col;
+      // fondo de celda apenas oscurecido de forma translúcida (sin manchas negras opacas)
+      vec3 base = col * (1.0 - 0.16 * wEnv);
+      col = mix(base, gCol, clamp(gAlp * wEnv * 1.12, 0.0, 1.0));
+    }
   }
   col += (hash12(gl_FragCoord.xy + fract(uTime) * 57.3) - 0.5) * 0.05;
   gl_FragColor = vec4(col, mask * uAlpha);

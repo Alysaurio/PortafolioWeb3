@@ -1,7 +1,7 @@
-// main.js — orquestador: máquina de estados, scroll, hit-testing del aro, UI y bucle de render.
+// main.js — orquestador: máquina de estados, scroll, aro/arito deslizable con límites estrictos, DETAIL_RECT y bucle de render.
 import * as THREE from 'three';
 import { QUAD_VS, BG_FS, BOX_FS, createGlyphAtlas } from './shaders.js';
-import { PHYSICS_CONFIG, ParticleSystem, centerAngle, boundaryAngle, segmentAt } from './particles.js';
+import { PHYSICS_CONFIG, ParticleSystem, centerAngle, boundaryAngle, segmentAt, wrapAngle } from './particles.js';
 import { VideoManager } from './videoManager.js';
 
 /* ===================== CONFIGURACIÓN EDITABLE ===================== */
@@ -14,9 +14,12 @@ const JUNCTION_MARGIN = 0.10;                // 10 % del arco junto a cada front
 const PREVIEW_OPEN_S = 0.5, DETAIL_OPEN_S = 0.55, SCROLL_COOLDOWN_MS = 650, VIDEO_OPEN_S = 0.42;
 const BG_SWITCH_S = 0.6;                     // crossfade del fondo al cambiar de segmento enfocado
 const TINT_MAX = 0.07, TINT_RATE = 3.7;      // 6–8 %, ≈ 800 ms
-const PREVIEW_R = 0.42;                      // R_preview / R_main (0.40–0.44)
+const PREVIEW_R = 0.42;                      // R_preview / R_main nominal (0.40–0.44)
+const RING_RB = 17;                          // grosor +30 % (antes 13 → 16.9 ≈ 17)
+const PREVIEW_RB = 9.1;                      // grosor +30 % del arito (antes 7 → 9.1), más delgado que el aro principal
+const DETAIL_RB = 18, DETAIL_OFF = 18;       // marco perimetral del rectángulo de detalle
 const BG_RING_LEVEL = 0.40;                  // visibilidad del fondo en Sección 2 respecto al Hero (35–45 %)
-const MAG_RADIUS = 120;                      // px, lupa micro-ASCII
+const MAG_RADIUS = 135;                      // px, escáner ASCII graduado
 
 export const STATE = Object.freeze({
   HERO_TEXT: 'HERO_TEXT', RING_IDLE: 'RING_IDLE', RING_JUNCTION: 'RING_JUNCTION',
@@ -55,6 +58,7 @@ async function boot() {
 
 function start(projects, canvas, gl2, FONT) {
   const N = projects.length;
+  const SEG = (Math.PI * 2) / N;
   const renderer = new THREE.WebGLRenderer({ canvas, context: gl2, antialias: false, alpha: false });
   renderer.setClearColor(new THREE.Color().setRGB(BASE_BG[0], BASE_BG[1], BASE_BG[2]), 1);
   const dpr = Math.min(window.devicePixelRatio || 1, 1.75);
@@ -87,7 +91,7 @@ function start(projects, canvas, gl2, FONT) {
       uCenter: { value: new THREE.Vector2() }, uHalf: { value: new THREE.Vector2(1, 1) }, uCorner: { value: 0 },
       uSoft: { value: 24 }, uMosaic: { value: 1 }, uVAspect: { value: 16 / 9 },
       uMagPos: { value: new THREE.Vector2() }, uMagR: { value: 0 }, uPulse: { value: 0 },
-      uDpr: { value: dpr }, uTime: { value: 0 }, uAlpha: { value: 0 },
+      uGridCell: { value: PHYSICS_CONFIG.cellSize }, uDpr: { value: dpr }, uTime: { value: 0 }, uAlpha: { value: 0 },
     },
   });
   const boxMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), boxMat);
@@ -105,6 +109,10 @@ function start(projects, canvas, gl2, FONT) {
   let state = STATE.HERO_TEXT, booted = false;
   let heroOver = false, aboutOver = false, scrollP = 0;
   let previewId = -1, previewWanted = false, previewP = 0, detailP = 0, detailWanted = false, mosaicT = 1;
+  // ángulo dinámico del «arito» deslizable dentro del segmento activo
+  let previewTheta = Math.PI / 2, previewThetaTarget = Math.PI / 2, previewThetaVel = 0;
+  let textPosX = 0, textPosY = 0, textPosInit = false;
+  let cursorWasInsideRect = false;
   const junction = { idx: -1 };
   let scrollLockUntil = 0;
   let tintAmt = 0; const tintCol = [...BASE_BG];
@@ -112,7 +120,6 @@ function start(projects, canvas, gl2, FONT) {
   let focusId = -1, bgFrom = 0, bgTo = 0, bgT = 1, lastShown = 0;
   const cur = { x: 0, y: 0, px: 0, py: 0, sx: 0, sy: 0, vx: 0, vy: 0, speed: 0, valid: false };
   let accDx = 0, accDy = 0, lastClientX = null, lastClientY = null;
-  const cavityCache = new Map();
 
   const bodyEl = document.body;
   const detailEl = $('#detail'), detailHint = $('#detail-hint');
@@ -121,8 +128,24 @@ function start(projects, canvas, gl2, FONT) {
 
   function setState(s) {
     if (s === state) return;
-    if (booted && ((state === STATE.HERO_TEXT) !== (s === STATE.HERO_TEXT))) ps.burst();   // Hero ↔ Aro: expansión + colapso violento
+    const prev = state;
     state = s; bodyEl.dataset.state = s;
+    if (!booted) {
+      if (s !== STATE.HERO_TEXT) ps.clearExplicitTargets();
+      return;
+    }
+    if (prev === STATE.HERO_TEXT && s !== STATE.HERO_TEXT) {
+      // transición específica ALYSAURIO → Aro: plegado bilateral y estiramiento en arco → compactación violenta
+      ps.foldHeroToRing(R, RING_RB);
+    } else if (prev !== STATE.HERO_TEXT && s === STATE.HERO_TEXT) {
+      // retorno Aro → ALYSAURIO: reconstrucción al 100 % de volumen y nitidez
+      ps.burstToHero();
+    } else if (prev === STATE.DETAIL_RECT && s !== STATE.DETAIL_RECT) {
+      ps.clearExplicitTargets();
+      cursorWasInsideRect = false;
+    } else if (s === STATE.ABOUT_DIVIDER) {
+      ps.clearExplicitTargets();
+    }
   }
 
   function resize() {
@@ -132,7 +155,7 @@ function start(projects, canvas, gl2, FONT) {
     bgMat.uniforms.uRes.value.set(W, H);
     ps.resize(W, H, dpr);
     ps.buildTextField('ALYSAURIO', FONT);
-    cavityCache.clear(); previewEl.dataset.id = '';
+    previewEl.dataset.id = ''; textPosInit = false;
     onScroll();
   }
   let rzT = 0;
@@ -147,13 +170,34 @@ function start(projects, canvas, gl2, FONT) {
     else { accDx += e.clientX - lastClientX; accDy += e.clientY - lastClientY; }
     lastClientX = e.clientX; lastClientY = e.clientY; cur.valid = true;
   }, { passive: true });
-  const leave = () => { cur.valid = false; lastClientX = null; };
-  document.documentElement.addEventListener('mouseleave', leave);
+  document.documentElement.addEventListener('mouseleave', () => {
+    cur.valid = false; lastClientX = null; cursorWasInsideRect = false;
+  });
 
-  /* --- geometría paramétrica --- */
-  function aritoGeom(id, e) {            // centro EXACTO sobre el punto medio del segmento en la circunferencia media
-    const a = centerAngle(id, N);
-    return { x: Math.cos(a) * R, y: Math.sin(a) * R, r: PREVIEW_R * R * e };
+  /* --- geometría paramétrica y límites estrictos del «arito» deslizable --- */
+  function previewBounds() {
+    const borderMargin = Math.min(0.045, SEG * 0.03);
+    const maxHalfArc = Math.max(0.08, SEG * 0.5 - borderMargin);
+    let rPrev = PREVIEW_R * R;
+    let halfArc = Math.asin(Math.min(0.95, (rPrev + PREVIEW_RB) / R));
+    // si N crece y estrecha el segmento, escala R_preview y centra en theta_mid → cero invasión de vecinos
+    if (halfArc > maxHalfArc) {
+      rPrev = Math.max(22, R * Math.sin(maxHalfArc) - PREVIEW_RB);
+      halfArc = maxHalfArc;
+    }
+    const deltaMax = Math.max(0, SEG * 0.5 - halfArc - borderMargin);
+    return { rPrev, halfArc, deltaMax };
+  }
+
+  function clampThetaToSegment(id, rawAngle) {
+    const mid = centerAngle(id, N);
+    const { deltaMax } = previewBounds();
+    return mid + clamp(wrapAngle(rawAngle - mid), -deltaMax, deltaMax);
+  }
+
+  function aritoGeom(e) {
+    const { rPrev } = previewBounds();
+    return { x: Math.cos(previewTheta) * R, y: Math.sin(previewTheta) * R, r: rPrev * e };
   }
   function boxGeom() {                   // rectángulo de detalle 16:9, desplazado a la derecha
     const hh = Math.min(H * 0.36, W * 0.30 * 9 / 16), hw = hh * 16 / 9;
@@ -162,7 +206,7 @@ function start(projects, canvas, gl2, FONT) {
   function currentBox() {
     if (previewId < 0) return null;
     const e = easeOutCubic(previewP), d = easeInOutCubic(detailP);
-    const a = aritoGeom(previewId, e), t = boxGeom();
+    const a = aritoGeom(e), t = boxGeom();
     const hw = lerp(a.r, t.hw, d), hh = lerp(a.r, t.hh, d);
     if (hw < 2 && d < 0.01) return null;
     return { x: lerp(a.x, t.x, d), y: lerp(a.y, t.y, d), hw, hh, cr: Math.min(lerp(a.r, t.cr, d), hw, hh) };
@@ -174,36 +218,35 @@ function start(projects, canvas, gl2, FONT) {
   }
   function cursorInArito() {
     if (previewId < 0) return false;
-    const a = aritoGeom(previewId, easeOutCubic(previewP));
+    const a = aritoGeom(easeOutCubic(previewP));
     return Math.hypot(cur.x - a.x, cur.y - a.y) < a.r;
   }
 
-  /* --- texto del «arito» dentro de la cavidad libre del aro (nunca toca el aro ni el arito) --- */
-  function cavityLayout(id) {
-    if (cavityCache.has(id)) return cavityCache.get(id);
-    const a = centerAngle(id, N), dx = Math.cos(a), dy = Math.sin(a);
-    const ax = dx * R, ay = dy * R, rp = PREVIEW_R * R;
+  /* --- texto dentro de la cavidad libre del aro, opuesto a theta_preview actual (nunca cruza ningún borde) --- */
+  function cavityLayout(id, theta) {
+    const { rPrev } = previewBounds();
+    const dx = Math.cos(theta), dy = Math.sin(theta);
+    const ax = dx * R, ay = dy * R;
     const fsT = clamp(R * 0.085, 13, 26), fsC = clamp(R * 0.04, 10.5, 14);
     const title = projects[id].title || '', concept = projects[id].shortConcept || '';
-    const inner = R - 13 - 16;
+    const inner = R - RING_RB - 16;
+    const aritoClear = rPrev + PREVIEW_RB + 16;
     let best = null;
-    for (let wb = R * 1.3; wb >= R * 0.45 && !best; wb -= R * 0.04) {
+    for (let wb = R * 1.28; wb >= R * 0.42 && !best; wb -= R * 0.04) {
       if (title.length * fsT * 0.86 > wb) continue;
       const lines = Math.min(3, Math.max(1, Math.ceil(concept.length * fsC * 0.62 / wb)));
       const hb = fsT * 1.4 + 8 + lines * fsC * 1.55;
-      for (let s = 0; s <= R * 0.7 && !best; s += R * 0.03) {
+      for (let s = 0; s <= R * 0.72 && !best; s += R * 0.03) {
         const cx = -dx * s, cy = -dy * s;
         let ok = true;
         for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
           const x = cx + sx * wb / 2, y = cy + sy * hb / 2;
-          if (Math.hypot(x, y) > inner || Math.hypot(x - ax, y - ay) < rp + 7 + 16) ok = false;
+          if (Math.hypot(x, y) > inner || Math.hypot(x - ax, y - ay) < aritoClear) ok = false;
         }
         if (ok) best = { cx, cy, w: wb, fsT, fsC };
       }
     }
-    if (!best) best = { cx: -dx * R * 0.35, cy: -dy * R * 0.35, w: R * 0.45, fsT, fsC };
-    cavityCache.set(id, best);
-    return best;
+    return best || { cx: -dx * R * 0.35, cy: -dy * R * 0.35, w: R * 0.42, fsT, fsC };
   }
 
   function openDetail() {
@@ -220,7 +263,10 @@ function start(projects, canvas, gl2, FONT) {
       const s = document.createElement('span'); s.className = 'pending'; s.textContent = 'REPOSITORIO — PRÓXIMAMENTE'; wrap.appendChild(s);
     }
     detailWanted = true; previewWanted = true;
+    cursorWasInsideRect = false;
     setState(STATE.DETAIL_RECT);
+    // redistribuye el 100 % del pool uniformemente sobre los 4 lados y 4 esquinas del rectángulo
+    ps.distributeRect(boxGeom(), DETAIL_OFF, DETAIL_RB);
     detailEl.classList.add('open'); detailHint.classList.add('open'); detailEl.setAttribute('aria-hidden', 'false');
   }
   function closeDetail() {
@@ -228,7 +274,7 @@ function start(projects, canvas, gl2, FONT) {
     detailWanted = false;
     scrollLockUntil = performance.now() + SCROLL_COOLDOWN_MS;
     detailEl.classList.remove('open'); detailHint.classList.remove('open'); detailEl.setAttribute('aria-hidden', 'true');
-    setState(STATE.RING_IDLE);   // el hit-test del siguiente frame decide si cae directo en otro RING_PREVIEW
+    setState(STATE.RING_IDLE);
   }
 
   window.addEventListener('click', (e) => {
@@ -278,10 +324,10 @@ function start(projects, canvas, gl2, FONT) {
     if (cur.valid) {
       const x = cur.x, y = cur.y, r = Math.hypot(x, y);
       if (previewId >= 0 && previewWanted && previewP > 0.02) {
-        const a = aritoGeom(previewId, Math.max(easeOutCubic(previewP), 0.3));
-        if (Math.hypot(x - a.x, y - a.y) < a.r + 10) want = { type: 'preview', id: previewId };
+        const a = aritoGeom(Math.max(easeOutCubic(previewP), 0.3));
+        if (Math.hypot(x - a.x, y - a.y) < a.r + 12) want = { type: 'preview', id: previewId };
       }
-      if (want.type === 'none' && Math.abs(r - R) < 0.14 * R + 13) {
+      if (want.type === 'none' && Math.abs(r - R) < 0.14 * R + RING_RB) {
         const { k, f } = segmentAt(Math.atan2(y, x), N);
         if (f < JUNCTION_MARGIN || f > 1 - JUNCTION_MARGIN) {
           const a = f < JUNCTION_MARGIN ? (k + N - 1) % N : k, b = f < JUNCTION_MARGIN ? k : (k + 1) % N;
@@ -291,11 +337,61 @@ function start(projects, canvas, gl2, FONT) {
       }
     }
     if (want.type === 'preview') {
-      if (previewId !== want.id) { if (previewP < 0.02) previewP = 0; previewId = want.id; mosaicT = 0; }
-      else if (!previewWanted) mosaicT = 0;
+      const curAng = Math.atan2(cur.y, cur.x);
+      if (previewId !== want.id) {
+        if (previewP < 0.02) previewP = 0;
+        previewId = want.id; mosaicT = 0; textPosInit = false;
+        previewTheta = previewThetaTarget = clampThetaToSegment(previewId, curAng);
+        previewThetaVel = 0;
+      } else if (!previewWanted) {
+        mosaicT = 0;
+        if (previewP < 0.08) {
+          previewTheta = previewThetaTarget = clampThetaToSegment(previewId, curAng);
+          previewThetaVel = 0;
+        }
+      }
       previewWanted = true; junction.idx = -1; setState(STATE.RING_PREVIEW);
     } else if (want.type === 'junction') { previewWanted = false; junction.idx = want.idx; setState(STATE.RING_JUNCTION); }
     else { previewWanted = false; junction.idx = -1; setState(STATE.RING_IDLE); }
+  }
+
+  /** Actualiza el deslizamiento suave de theta_preview a lo largo de R_main dentro de los límites estrictos del segmento. */
+  function updateSlidingArito(dt) {
+    if (previewId < 0) return;
+    const mid = centerAngle(previewId, N);
+    const { rPrev, deltaMax } = previewBounds();
+
+    if (state === STATE.RING_PREVIEW && cur.valid) {
+      const e = Math.max(easeOutCubic(previewP), 0.35);
+      const rpNow = rPrev * e;
+      const ax = Math.cos(previewTheta) * R, ay = Math.sin(previewTheta) * R;
+      const dist = Math.hypot(cur.x - ax, cur.y - ay);
+      const curAng = Math.atan2(cur.y, cur.x);
+      const curDelta = wrapAngle(curAng - mid);
+
+      if (dist < rpNow + 6) {
+        // zona libre central + empuje suave cuando el borde del radio reducido del cursor se acerca al límite interno
+        const freeAng = Math.max(0.04, (rpNow - PHYSICS_CONFIG.cursorRadius * 1.25) / R);
+        const err = wrapAngle(curAng - previewTheta);
+        if (Math.abs(err) > freeAng) {
+          const desiredDelta = clamp(curDelta - Math.sign(err) * freeAng, -deltaMax, deltaMax);
+          previewThetaTarget = mid + desiredDelta;
+        }
+      } else {
+        // cursor sobre el resto del mismo segmento fuera del vídeo → desliza suavemente hacia él
+        previewThetaTarget = mid + clamp(curDelta, -deltaMax, deltaMax);
+      }
+    } else {
+      // garantiza límites válidos ante cambios de tamaño
+      previewThetaTarget = mid + clamp(wrapAngle(previewThetaTarget - mid), -deltaMax, deltaMax);
+    }
+
+    // resorte amortiguado con inercia sedosa + clamping estricto
+    const diff = wrapAngle(previewThetaTarget - previewTheta);
+    previewThetaVel += (diff * 62 - previewThetaVel * 14) * dt;
+    const nextDelta = clamp(wrapAngle(previewTheta - mid) + previewThetaVel * dt, -deltaMax, deltaMax);
+    if (Math.abs(nextDelta) >= deltaMax - 1e-4) previewThetaVel *= 0.4;
+    previewTheta = mid + nextDelta;
   }
 
   /* ===================== BUCLE ===================== */
@@ -316,7 +412,10 @@ function start(projects, canvas, gl2, FONT) {
 
     updateScrollState();
     ringHitTest();
-    bodyEl.style.cursor = state === STATE.RING_PREVIEW && cur.valid && previewP > 0.35 && cursorInArito() ? 'pointer' : '';
+    updateSlidingArito(dt);
+
+    const inArito = state === STATE.RING_PREVIEW && cur.valid && previewP > 0.35 && cursorInArito();
+    bodyEl.style.cursor = inArito ? 'pointer' : '';
 
     previewP = clamp01(previewP + (previewWanted ? dt / PREVIEW_OPEN_S : -dt / 0.35));
     detailP = clamp01(detailP + (detailWanted ? dt / DETAIL_OPEN_S : -dt / DETAIL_OPEN_S));
@@ -334,7 +433,7 @@ function start(projects, canvas, gl2, FONT) {
       if (N > 1 && local >= CLIP_LEN - CROSSFADE && restartedTick !== tick) { restartedTick = tick; videos.restart(bj); }
     } else {
       if (focusId < 0) focusId = lastShown;
-      if (previewWanted && previewId >= 0) focusId = previewId;         // último proyecto apuntado se mantiene al salir a zona neutra
+      if (previewWanted && previewId >= 0) focusId = previewId;
       if (focusId !== bgTo) { bgFrom = bgTo; bgTo = focusId; bgT = 0; }
       bgT = clamp01(bgT + dt / BG_SWITCH_S);
       bgA = bgFrom; bgB = bgTo; bgMix = easeInOutCubic(bgT);
@@ -348,31 +447,60 @@ function start(projects, canvas, gl2, FONT) {
     videos.update(t, dt, needed, boxOn ? previewId : -1);
     for (let k = 0; k < N; k++) colorsRef[k] = videos.getColor(k);
 
-    // --- objetivos para el motor de partículas ---
-    const full = Math.PI / N * 0.992;
-    const ringOn = RING_STATES.has(state) || state === STATE.DETAIL_RECT ? 1 : 0;
-    const ap = new Array(N), gam = new Array(N);
-    const rpNow = PREVIEW_R * R * e;
-    const gamOpen = 2 * Math.asin(Math.min(1, rpNow / (2 * R))) * 0.92;      // el arito sustituye el tramo central; las «Y» quedan unidas
-    for (let k = 0; k < N; k++) { ap[k] = full * ringOn * (1 - d); gam[k] = k === previewId ? gamOpen : 0; }
+    // --- arcos asimétricos del aro (el «arito» deslizable recorta limpiamente su tramo en «Y») ---
+    const arcs = [];
+    const ringOn = (RING_STATES.has(state) || state === STATE.DETAIL_RECT) ? (1 - d) : 0;
+    if (ringOn > 0.03) {
+      const fullHalf = (SEG * 0.5) * 0.992 * ringOn;
+      const { rPrev } = previewBounds();
+      const rpNow = rPrev * e;
+      const gamOpen = (previewId >= 0 && previewP > 0.01) ? 2 * Math.asin(Math.min(0.95, rpNow / (2 * R))) * 0.92 : 0;
+      for (let k = 0; k < N; k++) {
+        const mid = centerAngle(k, N);
+        if (k === previewId && gamOpen > 0.02) {
+          const segStart = mid - fullHalf, segEnd = mid + fullHalf;
+          const pOff = mid + wrapAngle(previewTheta - mid);
+          const holeL = pOff - gamOpen, holeR = pOff + gamOpen;
+          if (holeL - segStart > 0.03) arcs.push({ mid: (segStart + holeL) * 0.5, half: (holeL - segStart) * 0.5 });
+          if (segEnd - holeR > 0.03) arcs.push({ mid: (holeR + segEnd) * 0.5, half: (segEnd - holeR) * 0.5 });
+        } else {
+          arcs.push({ mid, half: fullHalf });
+        }
+      }
+    }
 
     let box = null;
-    if (boxOn) box = { x: cb.x, y: cb.y, hw: cb.hw, hh: cb.hh, cr: cb.cr, rb: lerp(7, 18, d), off: lerp(0, 18, d), d, local: videos.getLocal(previewId) };
+    if (boxOn) {
+      box = {
+        x: cb.x, y: cb.y, hw: cb.hw, hh: cb.hh, cr: cb.cr,
+        rb: lerp(PREVIEW_RB, DETAIL_RB, d), off: lerp(0, DETAIL_OFF, d), d, local: videos.getLocal(previewId),
+      };
+    }
 
     const jn = { x: 0, y: 0, r: 0 };
     if (state === STATE.RING_JUNCTION && junction.idx >= 0) {
       const a = boundaryAngle(junction.idx, N), bx = Math.cos(a) * R, by = Math.sin(a) * R;
       jn.x = bx + clamp((cur.x - bx) * 0.35, -14, 14) + Math.sin(t * 5.3) * 3;
       jn.y = by + clamp((cur.y - by) * 0.35, -14, 14) + Math.cos(t * 4.7) * 3;
-      jn.r = 28;
+      jn.r = 32;
     }
 
+    const curInsideRect = state === STATE.DETAIL_RECT && detailP > 0.85 && cur.valid && cursorInsideBox();
+    const inPreviewArea = state === STATE.RING_PREVIEW && cur.valid && cursorInArito();
+
     ps.setTargets({
-      mode: state === STATE.HERO_TEXT ? 0 : 1, R, rb: 13, ap, gam, colors: colorsRef, box, junction: jn,
-      lineL: state === STATE.ABOUT_DIVIDER ? H * 0.46 : 0, lrb: 13, enabled: RING_STATES.has(state),
+      mode: state === STATE.HERO_TEXT ? 0 : 1,
+      R, rb: RING_RB, arcs, colors: colorsRef, box, junction: jn,
+      lineL: state === STATE.ABOUT_DIVIDER ? H * 0.46 : 0, lrb: 13,
+      enabled: RING_STATES.has(state),
+      pushScale: inPreviewArea ? PHYSICS_CONFIG.previewInnerPushScale : 1.0,
+      ringActive: RING_STATES.has(state),
+      isDetail: state === STATE.DETAIL_RECT,
+      curInsideRect, curWasInsideRect: cursorWasInsideRect,
     });
     ps.update(dt, t, cur);
     cur.px = cur.x; cur.py = cur.y;
+    cursorWasInsideRect = curInsideRect;
     booted = true;
 
     // --- uniformes de fondo + tinte ---
@@ -386,7 +514,7 @@ function start(projects, canvas, gl2, FONT) {
     bu.uTint.value.set(tintCol[0], tintCol[1], tintCol[2]);
     bu.uTintAmt.value = tintAmt * TINT_MAX;
 
-    // --- caja de vídeo ---
+    // --- caja de vídeo + escáner ASCII graduado ---
     if (boxOn) {
       boxMesh.visible = true;
       const u = boxMat.uniforms;
@@ -398,7 +526,7 @@ function start(projects, canvas, gl2, FONT) {
       u.uMosaic.value = 1 - easeOutCubic(mosaicT);
       u.uAlpha.value = clamp01(previewP * 4);
       u.uTime.value = t;
-      const magOn = state === STATE.DETAIL_RECT && detailP > 0.95 && cursorInsideBox() ? 1 : 0;
+      const magOn = state === STATE.DETAIL_RECT && detailP > 0.95 && curInsideRect ? 1 : 0;
       const tx = cur.sx, ty = H - cur.sy;
       if (magR < 2) { magX = tx; magY = ty; }
       const kk = expK(9, dt);
@@ -413,15 +541,19 @@ function start(projects, canvas, gl2, FONT) {
     heroSub.style.opacity = String(1 - smooth(0.04, 0.2, scrollP));
     scrollHint.style.opacity = String(1 - smooth(0.0, 0.08, scrollP));
     if (previewId >= 0) {
-      const o = clamp01((e - 0.6) / 0.4) * (1 - d) * (state === STATE.DETAIL_RECT ? 0 : 1) * (previewWanted ? 1 : 0.0);
+      const o = clamp01((e - 0.6) / 0.4) * (1 - d) * (state === STATE.DETAIL_RECT ? 0 : 1) * (previewWanted ? 1 : 0);
       previewEl.style.opacity = String(o);
-      if (previewEl.dataset.id !== String(previewId)) {
-        previewEl.dataset.id = String(previewId);
-        const L = cavityLayout(previewId);
-        ptTitle.textContent = projects[previewId].title; ptConcept.textContent = projects[previewId].shortConcept || '';
-        ptTitle.style.fontSize = L.fsT + 'px'; ptConcept.style.fontSize = L.fsC + 'px';
+      if (o > 0.01) {
+        const L = cavityLayout(previewId, previewTheta);
+        if (previewEl.dataset.id !== String(previewId)) {
+          previewEl.dataset.id = String(previewId);
+          ptTitle.textContent = projects[previewId].title; ptConcept.textContent = projects[previewId].shortConcept || '';
+          ptTitle.style.fontSize = L.fsT + 'px'; ptConcept.style.fontSize = L.fsC + 'px';
+        }
+        if (!textPosInit) { textPosX = L.cx; textPosY = L.cy; textPosInit = true; }
+        else { const kt = expK(10, dt); textPosX += (L.cx - textPosX) * kt; textPosY += (L.cy - textPosY) * kt; }
         previewEl.style.width = L.w + 'px';
-        previewEl.style.transform = `translate(${W / 2 + L.cx}px, ${H / 2 - L.cy}px) translate(-50%,-50%)`;
+        previewEl.style.transform = `translate(${W / 2 + textPosX}px, ${H / 2 - textPosY}px) translate(-50%,-50%)`;
       }
     } else previewEl.style.opacity = '0';
 
