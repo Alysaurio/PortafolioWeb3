@@ -80,9 +80,9 @@ void main(){
   vec2 frag = gl_FragCoord.xy / uDpr;
   vec2 dv = frag - uBhPos;
   float db = length(dv);
-  // alcance radial corto: R_horizon → R_horizon * 1.65 (desvanece limpiamente hacia rgba(r,g,b,0))
-  if (db > uBhR * 1.72) discard;
-  float outerClip = 1.0 - smoothstep(uBhR * 1.38, uBhR * 1.66, db);
+  // alcance radial corto apoyado sobre la primera corona ASCII incandescente (R_drawBlack → R_drawBlack * 1.60)
+  if (db > uBhR * 1.66) discard;
+  float outerClip = 1.0 - smoothstep(uBhR * 1.32, uBhR * 1.60, db);
   if (outerClip <= 0.002) discard;
 
   float bt = uBhTime;
@@ -91,38 +91,38 @@ void main(){
   float fl1 = sin(bt * 7.3) * 0.45 + sin(bt * 13.7 + 1.9) * 0.35 + sin(bt * 21.1 + 4.2) * 0.20;
   float fl2 = sin(bt * 6.1 + 2.7) * 0.45 + sin(bt * 15.3 + 0.6) * 0.35 + sin(bt * 23.7 + 3.1) * 0.20;
 
-  // 2 halos aditivos cálidos ligeramente descentrados (1.5–3.5 px) en giro horario
+  // 2 halos aditivos cálidos ligeramente descentrados (1.5–3.2 px) en giro horario
   float a1 = -bt * 1.15;
-  float off1 = clamp(uBhR * 0.075, 1.5, 3.5);
+  float off1 = clamp(uBhR * 0.065, 1.5, 3.2);
   float d1 = length(dv - vec2(cos(a1), sin(a1)) * off1);
-  float t1 = clamp((d1 - uBhR * 0.96) / max(uBhR * 0.69, 8.0), 0.0, 1.0);
-  float w1 = pow(1.0 - t1, 2.2) * outerClip * (1.0 + 0.20 * fl1) * 0.20;
+  float t1 = clamp((d1 - uBhR * 0.98) / max(uBhR * 0.62, 7.0), 0.0, 1.0);
+  float w1 = pow(1.0 - t1, 2.2) * outerClip * (1.0 + 0.20 * fl1) * 0.19;
 
   float a2 = -bt * 0.78 + 2.35;
-  float off2 = clamp(uBhR * 0.065, 1.5, 3.0);
+  float off2 = clamp(uBhR * 0.055, 1.5, 2.8);
   float d2 = length(dv - vec2(cos(a2), sin(a2)) * off2);
-  float t2 = clamp((d2 - uBhR * 0.96) / max(uBhR * 0.66, 8.0), 0.0, 1.0);
-  float w2 = pow(1.0 - t2, 2.4) * outerClip * (1.0 + 0.22 * fl2) * 0.11;
+  float t2 = clamp((d2 - uBhR * 0.98) / max(uBhR * 0.60, 7.0), 0.0, 1.0);
+  float w2 = pow(1.0 - t2, 2.4) * outerClip * (1.0 + 0.22 * fl2) * 0.10;
 
-  // coherencia cromática cálida con el plasma incandescente (sin complementarios simultáneos → cero gris)
+  // tonos saturados y limpios coherentes con el fuego adyacente (cero gris ni complementarios)
   vec3 cInner = vec3(1.000, 0.961, 0.863); // #FFF5DC blanco cálido
-  vec3 cAmber = vec3(1.000, 0.663, 0.227); // #FFA93A ámbar-oro luminoso
-  vec3 cFire  = vec3(1.000, 0.420, 0.169); // #FF6B2B naranja-fuego suave
-  vec3 cCoral = vec3(1.000, 0.451, 0.278); // deriva coral sutil
+  vec3 cAmber = vec3(1.000, 0.659, 0.204); // #FFA834 ámbar dorado
+  vec3 cFire  = vec3(1.000, 0.408, 0.125); // #FF6820 naranja fuego
+  vec3 cCoral = vec3(1.000, 0.451, 0.278); // leve deriva coral temporal
   float drift = 0.5 + 0.5 * sin(bt * 1.85 + ang * 0.5);
-  vec3 cOuter = mix(cFire, cCoral, drift * 0.42);
+  vec3 cOuter = mix(cFire, cCoral, drift * 0.35);
   vec3 col1 = t1 < 0.35
     ? mix(cInner, cAmber, smoothstep(0.0, 0.35, t1))
     : mix(cAmber, cOuter, smoothstep(0.35, 1.0, t1));
   vec3 col2 = mix(cInner, cAmber, smoothstep(0.0, 0.65, t2));
 
-  float alpha = clamp((w1 + w2) * uBhGlow, 0.0, 0.34);
+  float alpha = clamp((w1 + w2) * uBhGlow, 0.0, 0.32);
   if (alpha <= 0.002) discard;
   vec3 rgb = (col1 * w1 + col2 * w2) / max(w1 + w2, 0.0001);
   gl_FragColor = vec4(rgb, alpha);
 }`;
 
-/* Capa 2 del agujero negro — núcleo negro absoluto (#000000) encima en source-over con borde nítido (~1.25 px AA). */
+/* Capa 2 del agujero negro — núcleo negro absoluto (#000000) encima en source-over con borde nítido (~1 px AA). */
 export const BH_CORE_FS = /* glsl */`
 uniform vec2 uBhPos;
 uniform float uBhR;
@@ -132,7 +132,7 @@ void main(){
   if (uBhR <= 0.5) discard;
   vec2 frag = gl_FragCoord.xy / uDpr;
   float db = length(frag - uBhPos);
-  float a = 1.0 - smoothstep(uBhR - 0.75, uBhR + 0.5, db);
+  float a = 1.0 - smoothstep(uBhR - 0.6, uBhR + 0.4, db);
   if (a <= 0.004) discard;
   gl_FragColor = vec4(0.0, 0.0, 0.0, a);
 }`;

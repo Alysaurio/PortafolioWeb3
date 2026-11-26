@@ -1193,12 +1193,13 @@ export class ParticleSystem {
       const rInf = C.bhInitRadius + Math.pow(bh.ratioSm, 0.65) * diag * 0.95 + Math.min(280, bh.time * 65);
       const soft2 = C.bhSoftening * C.bhSoftening;
       const gConst = C.bhGravityBase * mass;
-      const ehMin = bh.ehVis + 1.0;
-      const rInnerWell = ehMin * 2.6;
-      const rAccOuter = ehMin * 3.8 + 46;
+      // R_physicsInner <= R_drawBlack - cellSize * 0.45 → la primera corona ASCII solapa limpiamente bajo #000000 (cero foso)
+      const ehMin = Math.max(4, bh.ehVis - C.cellSize * 0.45);
+      const rInnerWell = bh.ehVis * 2.6;
+      const rAccOuter = bh.ehVis * 3.8 + 46;
       const diskSpread = 52 + bh.ratioSm * 42;
       const vTangBase = 410 + 490 * (0.25 + 0.75 * bh.ratioSm);
-      const dragDen = Math.max(1, rAccOuter - ehMin * 1.15);
+      const dragDen = Math.max(1, rAccOuter - bh.ehVis * 1.15);
       const sxHalfW = Math.max(220, this.textHalfW * 1.15), sxHalfH = Math.max(90, this.H * 0.22);
       const tNow = this.S.time, bhTemp = this.bhTemp;
 
@@ -1247,26 +1248,28 @@ export class ParticleSystem {
 
         const nx = dx / d, ny = dy / d;            // radial hacia adentro
         const tx = -ny, ty = nx;                  // tangente orbital
-        // distribución radial asimétrica: núcleo denso junto al horizonte y dispersión nebulosa progresiva hacia afuera
-        const rSlot = ehMin + 2 + Math.pow(rnd[i], 2.25) * diskSpread;
+        // distribución radial asimétrica: núcleo denso tocando directamente el horizonte (#000000) sin foso vacío
+        const rSlot = ehMin + Math.pow(rnd[i], 2.25) * diskSpread;
         // velocidad tangencial diferencial: ω ∝ r^-1.15 → v = ω·r ∝ r^-0.15
-        const vTangTarget = vTangBase * Math.pow(ehMin / Math.max(d, ehMin), 0.15) * (0.86 + 0.28 * rnd[i]);
+        const vTangTarget = vTangBase * Math.pow(Math.max(bh.ehVis, 8) / Math.max(d, bh.ehVis, 8), 0.15) * (0.86 + 0.28 * rnd[i]);
         const vt = vx * tx + vy * ty;
         const vr = vx * nx + vy * ny;             // positivo = cayendo hacia adentro
+        // aceleración centrípeta exacta (vt²/r) para que el equilibrio orbital coincida con rSlot y no cree brecha centrífuga
+        const centrip = Math.min(20000, (vt * vt) / Math.max(d, ehMin));
 
         let ax = 0, ay = 0;
         if (d > rSlot + 16) {
           // espiral entrante continua (sin órbita lejana estable → cero segundo anillo)
           const vInTarget = Math.min(1850, 250 + 520 * bh.ratioSm + Math.sqrt(Math.min(gAcc, 14000)) * 9.5);
-          const pullR = (vInTarget - vr) * 5.2 + Math.min(gAcc, 6500) * 0.45;
+          const pullR = (vInTarget - vr) * 5.2 + Math.min(gAcc, 6500) * 0.45 + (d < rAccOuter ? centrip * 0.85 : 0);
           const pullT = (vTangTarget * Math.min(1, (rAccOuter * 1.4) / Math.max(d, ehMin)) - vt) * 3.8;
           ax = nx * pullR + tx * pullT;
           ay = ny * pullR + ty * pullT;
         } else {
-          // dentro del disco de acreción: rotación rápida con caída de densidad y leve dispersión periférica
-          const jitter = Math.sin(bh.time * 2.6 + rnd[i] * 18.0) * (3 + 10 * rnd[i] * rnd[i]);
+          // dentro del disco de acreción: rotación rápida pegada al borde del horizonte sin desfase centrífugo
+          const jitter = Math.sin(bh.time * 2.6 + rnd[i] * 18.0) * (2.5 + 9 * rnd[i] * rnd[i]);
           const err = d - (rSlot + jitter);
-          const pullR = err * 30 - vr * 5.8 + (d < rInnerWell ? Math.min(gAcc, 4500) * 0.15 : 0);
+          const pullR = centrip + err * 42 - vr * 7.5 + (d < rInnerWell ? Math.min(gAcc, 4500) * 0.12 : 0);
           const pullT = (vTangTarget - vt) * 7.5;
           ax = nx * pullR + tx * pullT;
           ay = ny * pullR + ty * pullT;
@@ -1341,10 +1344,11 @@ export class ParticleSystem {
         const dx = bhX - x, dy = bhY - y, d2 = dx * dx + dy * dy, d = Math.sqrt(d2) + 1e-4;
         const nx = dx / d, ny = dy / d, tx = -ny, ty = nx;
         const rn = exRnd[k];
-        const rSlot = ehMin + 3 + rn * rn * diskSpread;
-        const invR = ehMin / (d > ehMin ? d : ehMin);
+        const rSlot = ehMin + 0.5 + rn * rn * diskSpread;
+        const invR = Math.max(bh.ehVis, 8) / (d > bh.ehVis ? d : Math.max(bh.ehVis, 8));
         const vTangTarget = vTangBase * (0.78 + 0.22 * Math.sqrt(invR)) * (0.86 + 0.28 * rn);
         const vt = vx * tx + vy * ty, vr = vx * nx + vy * ny;
+        const centrip = Math.min(20000, (vt * vt) / (d > ehMin ? d : ehMin));
 
         let gLocal = gConst / (d2 + soft2);
         if (d < rInnerWell) {
@@ -1355,12 +1359,12 @@ export class ParticleSystem {
         let ax, ay;
         if (d > rSlot + 16) {
           const vIn = 340 + 580 * ratioSm + Math.sqrt(gLocal < 14000 ? gLocal : 14000) * 8.5;
-          const pullR = ((vIn < 1950 ? vIn : 1950) - vr) * 5.2 + (gLocal < 6000 ? gLocal : 6000) * 0.38;
+          const pullR = ((vIn < 1950 ? vIn : 1950) - vr) * 5.2 + (gLocal < 6000 ? gLocal : 6000) * 0.38 + (d < rAccOuter ? centrip * 0.85 : 0);
           const tAtt = (rAccOuter * 1.35) / (d > ehMin ? d : ehMin);
           const pullT = (vTangTarget * (tAtt < 1 ? tAtt : 1) - vt) * 3.8;
           ax = nx * pullR + tx * pullT; ay = ny * pullR + ty * pullT;
         } else {
-          const pullR = (d - rSlot) * 28 - vr * 5.6;
+          const pullR = centrip + (d - rSlot) * 40 - vr * 7.2;
           const pullT = (vTangTarget - vt) * 7.4;
           ax = nx * pullR + tx * pullT; ay = ny * pullR + ty * pullT;
         }
