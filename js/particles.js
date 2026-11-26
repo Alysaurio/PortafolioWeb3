@@ -3,7 +3,7 @@
 // • DETAIL_RECT con asentamiento sobreamortiguado (sin rebote), ondas contrapuestas, interacción unidireccional y barrera SDF estricta
 // • Agujero negro gravitacional en HERO_TEXT (masa progresiva, disco de acreción, absorción del fondo/textos y explosión restauradora)
 import * as THREE from 'three';
-import { GRID_CELL_SIZE, GRID_FS, QUAD_VS } from './shaders.js';
+import { GRID_CELL_SIZE, GRID_FS, BH_GLOW_FS, BH_CORE_FS, QUAD_VS } from './shaders.js';
 export { GRID_CELL_SIZE };
 
 /* ======================= AJUSTES FÍSICOS CENTRALIZADOS ======================= */
@@ -540,12 +540,31 @@ export class ParticleSystem {
       uniforms: {
         tGrid: { value: null }, tAtlas: { value: atlas }, uGrid: { value: new THREE.Vector2(1, 1) },
         uRes: { value: new THREE.Vector2(1, 1) }, uCell: { value: C.cellSize }, uDpr: { value: 1 },
-        uBhPos: { value: new THREE.Vector2() }, uBhR: { value: 0 }, uBhRim: { value: 0 }, uBhWarm: { value: 0 },
-        uBhTime: { value: 0 }, uBhMass: { value: 0 },
       },
     });
     this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.material);
     this.mesh.frustumCulled = false; this.mesh.renderOrder = 3;
+
+    // dos capas independientes para el horizonte de eventos: (1) brillo puramente aditivo y (2) núcleo negro #000000 encima
+    this.bhU = {
+      uBhPos: { value: new THREE.Vector2() }, uBhR: { value: 0 },
+      uBhGlow: { value: 0 }, uBhTime: { value: 0 }, uDpr: { value: 1 },
+    };
+    const bhQuad = new THREE.PlaneGeometry(2, 2);
+    this.bhGlowMesh = new THREE.Mesh(bhQuad, new THREE.ShaderMaterial({
+      vertexShader: QUAD_VS, fragmentShader: BH_GLOW_FS, transparent: true,
+      blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false,
+      uniforms: this.bhU,
+    }));
+    this.bhGlowMesh.frustumCulled = false; this.bhGlowMesh.renderOrder = 4; this.bhGlowMesh.visible = false;
+    this.bhCoreMesh = new THREE.Mesh(bhQuad, new THREE.ShaderMaterial({
+      vertexShader: QUAD_VS, fragmentShader: BH_CORE_FS, transparent: true,
+      blending: THREE.NormalBlending, depthTest: false, depthWrite: false,
+      uniforms: { uBhPos: this.bhU.uBhPos, uBhR: this.bhU.uBhR, uDpr: this.bhU.uDpr },
+    }));
+    this.bhCoreMesh.frustumCulled = false; this.bhCoreMesh.renderOrder = 5; this.bhCoreMesh.visible = false;
+    this.mesh.add(this.bhGlowMesh);
+    this.mesh.add(this.bhCoreMesh);
 
     this.setProjects(N);
     this.ropeO = new Float32Array(ROPE_N); this.ropeV = new Float32Array(ROPE_N); this.ropeE = new Float32Array(ROPE_N);
@@ -591,6 +610,7 @@ export class ParticleSystem {
     this.gridTex.generateMipmaps = false; this.gridTex.needsUpdate = true;
     const u = this.material.uniforms;
     u.tGrid.value = this.gridTex; u.uGrid.value.set(this.gw, this.gh); u.uRes.value.set(W, H); u.uDpr.value = dpr;
+    this.bhU.uDpr.value = dpr;
     this.hgw = Math.ceil(W / HC) + 3; this.hgh = Math.ceil(H / HC) + 3;
     this.hStart = new Int32Array(this.hgw * this.hgh + 1);
     this.S.ropeH = H * 0.46;
@@ -1439,14 +1459,16 @@ export class ParticleSystem {
       }
     }
 
-    // actualiza uniformes del horizonte de eventos y su corona titilante en GRID_FS
-    const u = this.material.uniforms;
-    u.uBhPos.value.set(hW + bh.x, hH + bh.y);
-    u.uBhR.value = bh.ehVis;
-    u.uBhRim.value = bh.rim;
-    u.uBhWarm.value = bh.warm;
-    u.uBhTime.value = bh.active ? bh.time : (bh.time + bh.relTime);
-    u.uBhMass.value = bh.active ? Math.min(1, 0.28 + 0.72 * bh.ratioSm) : Math.max(0, (0.28 + 0.72 * bh.ratioSm) * (1 - bh.relTime / 0.18));
+    // actualiza uniformes de las dos capas del horizonte (brillo aditivo + núcleo #000000 encima)
+    const bu = this.bhU;
+    const vis = bh.ehVis > 0.5;
+    bu.uBhPos.value.set(hW + bh.x, hH + bh.y);
+    bu.uBhR.value = bh.ehVis;
+    bu.uBhTime.value = bh.active ? bh.time : (bh.time + bh.relTime);
+    const massScale = Math.min(1, 0.45 + 0.55 * bh.ratioSm);
+    bu.uBhGlow.value = bh.active ? massScale : Math.max(0, massScale * (1 - bh.relTime / 0.16));
+    this.bhGlowMesh.visible = vis && bu.uBhGlow.value > 0.002;
+    this.bhCoreMesh.visible = vis;
   }
 
   /** cur: {x,y,px,py,vx,vy,speed,valid} coords centradas (y arriba), px/s */
@@ -1470,10 +1492,10 @@ export class ParticleSystem {
     this.heroModeSm += (heroTargetSm - this.heroModeSm) * (1 - Math.exp(-7 * dt));
     if (this.bh.releasing) this._updateBlackHole(dt, cur);
     else {
-      this.material.uniforms.uBhR.value = 0;
-      this.material.uniforms.uBhRim.value = 0;
-      this.material.uniforms.uBhWarm.value = 0;
-      this.material.uniforms.uBhMass.value = 0;
+      this.bhU.uBhR.value = 0;
+      this.bhU.uBhGlow.value = 0;
+      this.bhGlowMesh.visible = false;
+      this.bhCoreMesh.visible = false;
       this._extraAlpha = 0;
       if (this.heroNoBounceTimer > 0) {
         this.heroNoBounceTimer -= dt;
