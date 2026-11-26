@@ -10,6 +10,7 @@ const CONTACT_EMAIL = '[correo-pendiente@ejemplo.com]';
 const BASE_BG = [0x12 / 255, 0x13 / 255, 0x15 / 255];
 const CLIP_LEN = 3.5, CROSSFADE = 0.8;       // clips del hero
 const HERO_EXIT = 0.18, HERO_ENTER = 0.12;   // umbral de scroll (fracción de viewport)
+const RING_MID = 0.88;                       // punto medio / zona de reposo de Sección 2 (arma la compresión al subir)
 const ABOUT_ENTER = 1.40, ABOUT_EXIT = 1.30;
 const JUNCTION_MARGIN = 0.10;                // 10 % del arco junto a cada frontera
 const PREVIEW_OPEN_S = 0.42, DETAIL_OPEN_S = 0.55, SCROLL_COOLDOWN_MS = 650, VIDEO_OPEN_S = 0.42;
@@ -110,9 +111,10 @@ function start(projects, canvas, gl2, FONT) {
   scene.add(ps.mesh);
 
   /* ===================== ESTADO ===================== */
-  let W = 1, H = 1, R = 300;
+  let W = 1, H = 1, R_base = 300, R = 300;
   let state = STATE.HERO_TEXT, booted = false;
   let heroOver = false, aboutOver = false, scrollP = 0;
+  let hasReachedRingMidpoint = false, compressP = 0, chargeSm = 0;
   let previewId = -1, previewWanted = false, detailP = 0, detailWanted = false, mosaicT = 1;
   // escala de apertura independiente por proyecto (evita heredar tamaño residual al cambiar rápido entre segmentos)
   const entryScale = new Float32Array(N);
@@ -152,9 +154,17 @@ function start(projects, canvas, gl2, FONT) {
       return;
     }
     if (prev === STATE.HERO_TEXT && s !== STATE.HERO_TEXT) {
-      ps.foldHeroToRing(R, RING_RB);
+      // bajada ALYSAURIO → Aro: siempre a 100 % del radio normal sin compresión previa
+      ps.foldHeroToRing(R_base, RING_RB);
     } else if (prev !== STATE.HERO_TEXT && s === STATE.HERO_TEXT) {
-      ps.burstToHero();
+      if (hasReachedRingMidpoint) {
+        // detonación explosiva desde el aro comprimido al 50 % → reconstrucción limpia sin elasticidad
+        hasReachedRingMidpoint = false; compressP = 0; chargeSm = 0; R = R_base;
+        previewWanted = false; previewId = -1; entryScale.fill(0); junction.idx = -1;
+        ps.detonateToHero();
+      } else {
+        ps.burstToHero();
+      }
     } else if (prev === STATE.DETAIL_RECT && s !== STATE.DETAIL_RECT) {
       ps.clearExplicitTargets();
       cursorWasInsideRect = false;
@@ -166,7 +176,8 @@ function start(projects, canvas, gl2, FONT) {
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     renderer.setSize(W, H, false);
-    R = Math.min(Math.min(W, H) * 0.31, 340);
+    R_base = Math.min(Math.min(W, H) * 0.31, 340);
+    R = R_base * (1 - 0.50 * chargeSm);
     bgMat.uniforms.uRes.value.set(W, H);
     ps.resize(W, H, dpr);
     ps.buildTextField('ALYSAURIO', FONT);
@@ -324,8 +335,9 @@ function start(projects, canvas, gl2, FONT) {
     const u = clamp01((delta + ACTIVE_HALF) / (2 * ACTIVE_HALF));
     const posScale = Math.pow(Math.sin(u * Math.PI), 0.72);
     const rVideoMax = PREVIEW_R_MAX * R;
+    const prevRb = PREVIEW_RB * lerp(1.0, 0.72, chargeSm);
     const distToSegBorder = Math.max(0, SEG * 0.5 - Math.abs(delta));
-    const rGeoLimit = Math.max(0, R * Math.sin(Math.min(Math.PI * 0.49, distToSegBorder)) - PREVIEW_RB);
+    const rGeoLimit = Math.max(0, R * Math.sin(Math.min(Math.PI * 0.49, distToSegBorder)) - prevRb);
     return Math.min(rVideoMax * posScale, rGeoLimit);
   }
 
@@ -458,11 +470,20 @@ function start(projects, canvas, gl2, FONT) {
   function updateScrollState() {
     if (state === STATE.DETAIL_RECT || bhMode !== 'idle') return;
     const p = scrollP;
+    if (p >= RING_MID) hasReachedRingMidpoint = true;
     if (!heroOver && p > HERO_EXIT) heroOver = true; else if (heroOver && p < HERO_ENTER) heroOver = false;
     if (!aboutOver && p > ABOUT_ENTER) aboutOver = true; else if (aboutOver && p < ABOUT_EXIT) aboutOver = false;
-    if (!heroOver) { setState(STATE.HERO_TEXT); previewWanted = false; junction.idx = -1; }
-    else if (aboutOver) { setState(STATE.ABOUT_DIVIDER); previewWanted = false; junction.idx = -1; }
-    else if (state === STATE.HERO_TEXT || state === STATE.ABOUT_DIVIDER) setState(STATE.RING_IDLE);
+    if (!heroOver) { setState(STATE.HERO_TEXT); previewWanted = false; junction.idx = -1; compressP = 0; }
+    else if (aboutOver) { setState(STATE.ABOUT_DIVIDER); previewWanted = false; junction.idx = -1; compressP = 0; }
+    else {
+      if (state === STATE.HERO_TEXT || state === STATE.ABOUT_DIVIDER) setState(STATE.RING_IDLE);
+      // ventana reversible de compresión (solo al subir desde el punto medio de Sección 2 hacia Hero)
+      if (hasReachedRingMidpoint && p < RING_MID && p > HERO_ENTER) {
+        compressP = clamp01((RING_MID - p) / (RING_MID - HERO_ENTER));
+      } else {
+        compressP = 0;
+      }
+    }
   }
 
   function ringHitTest() {
@@ -543,6 +564,13 @@ function start(projects, canvas, gl2, FONT) {
     if (cur.speed < 5) { cur.vx = cur.vy = 0; cur.speed = 0; }
 
     updateScrollState();
+    // compresión progresiva reversible del radio principal (hasta 50 %) conservando el grosor constante
+    const chargeTarget = RING_STATES.has(state) ? Math.pow(compressP, 1.35) : 0;
+    chargeSm += (chargeTarget - chargeSm) * expK(18, dt);
+    if (chargeSm < 0.001 && chargeTarget === 0) chargeSm = 0;
+    R = R_base * (1.0 - 0.50 * chargeSm);
+    const previewRbNow = PREVIEW_RB * lerp(1.0, 0.72, chargeSm);
+
     ringHitTest();
     updateRadialProjection(dt);
 
@@ -635,7 +663,7 @@ function start(projects, canvas, gl2, FONT) {
     if (boxOn) {
       box = {
         x: cb.x, y: cb.y, hw: cb.hw, hh: cb.hh, cr: cb.cr, vidR: cb.vidR,
-        rb: lerp(PREVIEW_RB, DETAIL_RB, d), off: lerp(0, DETAIL_OFF, d), d, local: videos.getLocal(previewId),
+        rb: lerp(previewRbNow, DETAIL_RB, d), off: lerp(0, DETAIL_OFF, d), d, local: videos.getLocal(previewId),
       };
     }
 
@@ -653,7 +681,9 @@ function start(projects, canvas, gl2, FONT) {
     if (aritoPusherOn) {
       const ax = Math.cos(previewTheta) * R, ay = Math.sin(previewTheta) * R;
       if (!prevAritoOn) { prevAritoX = ax; prevAritoY = ay; }
-      pusher = { x: ax, y: ay, px: prevAritoX, py: prevAritoY, radius: vidR, pushScale: PHYSICS_CONFIG.previewInnerPushScale };
+      const aSpd = Math.min(Math.hypot(ax - prevAritoX, ay - prevAritoY) / Math.max(dt, 1e-3), 4000);
+      const aPush = PHYSICS_CONFIG.previewInnerPushScale * (1 + Math.min(0.28, aSpd / 2400));
+      pusher = { x: ax, y: ay, px: prevAritoX, py: prevAritoY, radius: vidR, pushScale: aPush };
       prevAritoX = ax; prevAritoY = ay; prevAritoOn = true;
     } else {
       prevAritoOn = false;
@@ -672,6 +702,7 @@ function start(projects, canvas, gl2, FONT) {
       enabled: RING_STATES.has(state),
       pusher,
       ringActive: RING_STATES.has(state),
+      charge: RING_STATES.has(state) ? chargeSm : 0,
       isDetail: state === STATE.DETAIL_RECT,
       curInsideRect, curWasInsideRect: cursorWasInsideRect,
     });
@@ -720,7 +751,10 @@ function start(projects, canvas, gl2, FONT) {
     scrollHint.style.opacity = String((1 - smooth(0.0, 0.08, scrollP)) * heroDomMul);
     if (previewId >= 0) {
       const es = entryScale[previewId];
-      const o = clamp01((es - 0.35) / 0.45) * smooth(MIN_VIDEO_PX, MIN_VIDEO_PX + 24, vidR) * (1 - d) * (state === STATE.DETAIL_RECT ? 0 : 1) * (previewWanted ? 1 : 0);
+      // si la compresión estrecha la cavidad interior (p > 0.30), atenúa y reduce el texto para evitar cualquier cruce
+      const compTextFade = 1 - smooth(0.30, 0.62, compressP);
+      const compTextScale = lerp(0.84, 1.0, compTextFade);
+      const o = clamp01((es - 0.35) / 0.45) * smooth(MIN_VIDEO_PX, MIN_VIDEO_PX + 24, vidR) * (1 - d) * (state === STATE.DETAIL_RECT ? 0 : 1) * (previewWanted ? 1 : 0) * compTextFade;
       previewEl.style.opacity = String(o);
       if (o > 0.01) {
         const L = cavityLayout(previewId, previewTheta, vidR);
@@ -733,7 +767,7 @@ function start(projects, canvas, gl2, FONT) {
         else { const kt = expK(12, dt); textPosX += (L.cx - textPosX) * kt; textPosY += (L.cy - textPosY) * kt; }
         previewEl.style.width = L.w + 'px';
         previewEl.style.maxWidth = L.w + 'px';
-        previewEl.style.transform = `translate(${W / 2 + textPosX}px, ${H / 2 - textPosY}px) translate(-50%,-50%)`;
+        previewEl.style.transform = `translate(${W / 2 + textPosX}px, ${H / 2 - textPosY}px) translate(-50%,-50%) scale(${compTextScale})`;
       }
     } else previewEl.style.opacity = '0';
 

@@ -12,7 +12,7 @@ export const PHYSICS_CONFIG = {
   cellSize: GRID_CELL_SIZE,          // fuente única compartida con BG_FS y GRID_FS (7 px CSS)
   particleCount: { low: 2600, mid: 2900, high: 3200 },   // pool fijo estrictamente conservado
   pushForce: 1.00,                   // impulso del cursor en estado base
-  previewInnerPushScale: 0.18,       // empuje suave del círculo del vídeo del «arito»
+  previewInnerPushScale: 0.35,       // empuje moderado del círculo del vídeo del «arito» (32–38 %)
   magneticBrake: 0.20,               // 20 % — leve rebote elástico en el Aro y Hero
   cursorRadius: 85,                  // px, radio base restaurado (sin «arito» activo)
   xsphCohesion: 0.30,                // arrastre de vecinas (XSPH) en Fase 1
@@ -32,9 +32,13 @@ export const PHYSICS_CONFIG = {
   apexSpeed: 110, smokeMax: 1.7, turbulence: 140,
   burstTime: 0.42,                   // s expansión pantalla completa (Aro → Hero)
   foldDuration: 0.40,                // s plegado bilateral ALYSAURIO → halo anular
-  // regeneración progresiva de huecos (tasa lenta → aceleración cuadrática/cúbica)
-  gapRegenBaseRate: 6, gapRegenAccel2: 42, gapRegenAccel3: 75,
-  gapHaloMin: 24, gapHaloMax: 55,
+  // regeneración progresiva de huecos en micro-cúmulos periféricos (tasa lenta → aceleración cuadrática/cúbica)
+  gapRegenBaseRate: 7, gapRegenAccel2: 46, gapRegenAccel3: 82,
+  gapHaloMin: 55, gapHaloMax: 115,   // px, halo periférico exterior donde nacen los micro-cúmulos
+  gapClusterMin: 8, gapClusterMax: 16,
+  gapClusterRadiusMin: 10, gapClusterRadiusMax: 18,
+  gapClusterStaggerMs: 65,           // ms de escalonamiento dentro de cada micro-cúmulo
+  gapPreviewRateMult: 1.55,          // 1.5× aceleración de regeneración con «arito» activo
   // interacción unidireccional en DETAIL_RECT (solo desde el interior y salida rápida)
   rectPushRadius: 78, rectInnerBulge: 2600, rectExitImpulse: 0.65,
   // agujero negro gravitacional en HERO_TEXT
@@ -258,6 +262,8 @@ export class ParticleSystem {
     this.emerge = new Float32Array(n).fill(1);
     this.bhPulled = new Uint8Array(n);       // partículas de ALYSAURIO ya desprendidas por el agujero negro
     this.hasTarget = new Uint8Array(n);
+    this.clusterFlight = new Uint8Array(n);  // micro-cúmulo regenerativo en vuelo (cohesión XSPH + leve curvatura)
+    this.clusterCurve = new Float32Array(n);
     this.tx = new Float32Array(n); this.ty = new Float32Array(n);
     this.rectU = new Float32Array(n); this.rectOff = new Float32Array(n);
     this.bdx = new Float32Array(n); this.bdy = new Float32Array(n);
@@ -289,6 +295,7 @@ export class ParticleSystem {
     // estado interno del agujero negro
     this.bh = { active: false, releasing: false, x: 0, y: 0, time: 0, bgTime: 0, bgCaptured: false, relTime: 0, ratio: 0, ratioSm: 0, ehR: 0, ehVis: 0, rim: 0, warm: 0 };
     this.heroNoBounce = false;
+    this.heroNoBounceTimer = 0;
 
     for (let i = 0; i < n; i++) { this.rnd[i] = Math.random(); this.rectU[i] = i / n; this.rectOff[i] = (Math.random() - 0.5) * 1.5; }
 
@@ -329,7 +336,7 @@ export class ParticleSystem {
       pusher: null,
       jx: 0, jy: 0, jr: 0, jtx: 0, jty: 0, jtr: 0,
       L: 0, LT: 0, lrb: 13, ropeH: 400, ro: null,
-      ringActive: false,
+      ringActive: false, charge: 0,
     };
   }
 
@@ -386,6 +393,8 @@ export class ParticleSystem {
   burstToHero() {
     const pts = this._stratified();
     this._assignTextTargets();
+    this.heroNoBounce = false; this.heroNoBounceTimer = 0;
+    this.clusterFlight.fill(0);
     for (let i = 0; i < this.n; i++) {
       this.bdx[i] = pts[i][0]; this.bdy[i] = pts[i][1];
       this.phase[i] = 4; this.timer[i] = C.burstTime * (0.85 + this.rnd[i] * 0.3);
@@ -394,7 +403,26 @@ export class ParticleSystem {
     this.gapAge.fill(0); this.spawnAcc.fill(0);
   }
 
+  /** Detonación explosiva desde el aro comprimido al 50 % → nube expansiva → reconstrucción limpia sin elasticidad en ALYSAURIO. */
+  detonateToHero() {
+    this._assignTextTargets();
+    this.heroNoBounce = true; this.heroNoBounceTimer = 1.15;
+    this.clusterFlight.fill(0);
+    for (let i = 0; i < this.n; i++) {
+      const ang = Math.atan2(this.py[i], this.px[i]) + (this.rnd[i] - 0.5) * 0.44;
+      const sp = 1450 + 1750 * Math.random();
+      this.vx[i] = Math.cos(ang) * sp;
+      this.vy[i] = Math.sin(ang) * sp;
+      this.phase[i] = 6;
+      this.timer[i] = 0.16 + 0.05 * this.rnd[i];   // 160–210 ms de expansión radial
+      this.arrived[i] = 0; this.heat[i] = 1.0; this.emerge[i] = 1;
+    }
+    this.gapAge.fill(0); this.spawnAcc.fill(0);
+  }
+
   foldHeroToRing(R, rb) {
+    this.heroNoBounce = false; this.heroNoBounceTimer = 0;
+    this.clusterFlight.fill(0);
     const halfW = Math.max(80, this.textHalfW);
     const n = this.n;
     for (let i = 0; i < n; i++) {
@@ -589,6 +617,7 @@ export class ParticleSystem {
     const S = this.S;
     S.mode = t.mode; S.R = t.R; S.rb = t.rb;
     S.ringActive = !!t.ringActive;
+    S.charge = t.charge || 0;
     S.isDetail = !!t.isDetail;
     S.curInsideRect = !!t.curInsideRect;
     S.curWasInsideRect = !!t.curWasInsideRect;
@@ -678,12 +707,13 @@ export class ParticleSystem {
     const n = this.n;
     for (let b = 0; b < TOTAL_BUCKETS; b++) bIdeal[b] = bActive[b] ? (bIdeal[b] / totalArea) * n : 0;
 
-    const px = this.px, py = this.py, phase = this.phase;
+    const px = this.px, py = this.py, phase = this.phase, clF = this.clusterFlight;
     for (let i = 0; i < n; i++) {
       const ph = phase[i];
-      if (ph !== 0 && ph !== 3) continue;
-      const x = (ph === 3 && this.hasTarget[i]) ? this.tx[i] : px[i];
-      const y = (ph === 3 && this.hasTarget[i]) ? this.ty[i] : py[i];
+      const isClWait = ph === 2 && clF[i];
+      if (ph !== 0 && ph !== 3 && !isClWait) continue;
+      const x = ((ph === 3 || isClWait) && this.hasTarget[i]) ? this.tx[i] : px[i];
+      const y = ((ph === 3 || isClWait) && this.hasTarget[i]) ? this.ty[i] : py[i];
       const dRing = Math.abs(Math.hypot(x, y) - R) - rb;
       let dArito = 1e9;
       if (aritoOn) dArito = Math.abs(Math.hypot(x - bx, y - by) - rp) - brb;
@@ -703,60 +733,115 @@ export class ParticleSystem {
 
     const hW = this.W * 0.5, hH = this.H * 0.5;
     const hMin = C.gapHaloMin, hSpan = C.gapHaloMax - C.gapHaloMin;
+    const aritoAng = aritoOn ? Math.atan2(by, bx) : 0;
+    const staggerS = C.gapClusterStaggerMs / 1000;
+
     for (let b = 0; b < TOTAL_BUCKETS; b++) {
       if (!bActive[b] || bIdeal[b] < 2) { this.gapAge[b] = 0; this.spawnAcc[b] = 0; continue; }
       const ratio = bCount[b] / bIdeal[b];
       if (ratio < 0.80 || (this.gapAge[b] > 0 && ratio < 0.94)) {
-        const age = (this.gapAge[b] += dt);
-        const rate = C.gapRegenBaseRate + C.gapRegenAccel2 * age * age + C.gapRegenAccel3 * age * age * age;
+        const isAritoBucket = b >= RING_BUCKETS;
+        // prioridad ágil en el contorno del arito y su estela inmediata en el aro principal
+        let nearWake = false;
+        if (aritoOn && !isAritoBucket) {
+          const bAng = (b + 0.5) / RING_BUCKETS * TWO_PI;
+          nearWake = Math.abs(wrapAngle(bAng - aritoAng)) < 0.85;
+        }
+        const agile = aritoOn && (isAritoBucket || nearWake);
+        // latencia inicial reducida a la mitad con «arito» activo (0.07 s vs 0.14 s)
+        const latency = agile ? 0.07 : 0.14;
+        const prevAge = this.gapAge[b];
+        const age = (this.gapAge[b] += dt * (agile ? 1.25 : 1.0));
+        if (age < latency) continue;
+
+        const effAge = age - latency;
+        const mult = agile ? (isAritoBucket ? C.gapPreviewRateMult * 1.15 : C.gapPreviewRateMult) : 1.0;
+        const rate = (C.gapRegenBaseRate + C.gapRegenAccel2 * effAge * effAge + C.gapRegenAccel3 * effAge * effAge * effAge) * mult;
+        // pre-carga discreta al vencer la latencia para lanzar enseguida el primer micro-cúmulo
+        if (prevAge < latency) this.spawnAcc[b] += agile ? 6.5 : 3.5;
         this.spawnAcc[b] += rate * dt;
-        let toSpawn = Math.min(8, this.spawnAcc[b] | 0);
-        if (toSpawn <= 0) continue;
-        this.spawnAcc[b] -= toSpawn;
 
-        while (toSpawn > 0 && bCount[b] < bIdeal[b] * 0.96) {
-          let src = -1, bestExcess = 1.04;
-          for (let s = 0; s < TOTAL_BUCKETS; s++) {
-            if (!bActive[s] || bHead[s] < 0 || bIdeal[s] < 1) continue;
-            const ex = bCount[s] / bIdeal[s];
-            if (ex > bestExcess) { bestExcess = ex; src = s; }
-          }
-          if (src < 0) break;
+        const deficit = Math.max(0, Math.ceil(bIdeal[b] * 0.96 - bCount[b]));
+        const minBatch = Math.min(deficit, C.gapClusterMin);
+        if (this.spawnAcc[b] < minBatch || deficit <= 0) continue;
 
-          const i = bHead[src];
-          bHead[src] = bNext[i];
-          bCount[src]--; bCount[b]++;
-          toSpawn--;
+        // forma 1–2 micro-cúmulos compactos (8–16 partículas cada uno, 2–4 en huecos amplios a lo largo de varios frames)
+        const batchTarget = Math.min(deficit, Math.min(C.gapClusterMax, Math.max(minBatch, this.spawnAcc[b] | 0)));
+        this.spawnAcc[b] = Math.max(0, this.spawnAcc[b] - batchTarget);
 
-          let tx, ty, nx, ny;
-          if (b < RING_BUCKETS) {
-            const ang = (b + Math.random()) / RING_BUCKETS * TWO_PI;
-            nx = Math.cos(ang); ny = Math.sin(ang);
-            const rr = R + (Math.random() - 0.5) * 1.45 * rb;
-            tx = nx * rr; ty = ny * rr;
-            const side = Math.random() < 0.72 ? 1 : -1;
-            const dist = hMin + Math.random() * hSpan;
-            const tang = (Math.random() - 0.5) * 18;
-            px[i] = Math.max(-hW + 4, Math.min(hW - 4, tx + nx * side * dist - ny * tang));
-            py[i] = Math.max(-hH + 4, Math.min(hH - 4, ty + ny * side * dist + nx * tang));
-            arcColor(S, tx, ty); this.cr[i] = oR; this.cg[i] = oG; this.cb[i] = oB;
+        const numClusters = batchTarget >= 14 ? 2 : 1;
+        let remaining = batchTarget;
+        for (let cl = 0; cl < numClusters && remaining > 0; cl++) {
+          const cSize = cl === numClusters - 1 ? remaining : Math.ceil(remaining / (numClusters - cl));
+          remaining -= cSize;
+
+          // foco compacto del micro-cúmulo en el halo exterior (55–115 px hacia afuera del tramo vacío)
+          let fx, fy, fAng, fNx, fNy;
+          if (!isAritoBucket) {
+            fAng = (b + 0.18 + Math.random() * 0.64) / RING_BUCKETS * TWO_PI;
+            fNx = Math.cos(fAng); fNy = Math.sin(fAng);
+            const hDist = hMin + Math.random() * hSpan;
+            fx = fNx * (R + hDist); fy = fNy * (R + hDist);
           } else {
             const ab = b - RING_BUCKETS;
-            const ang = (ab + Math.random()) / ARITO_BUCKETS * TWO_PI;
-            nx = Math.cos(ang); ny = Math.sin(ang);
-            const rr = rp + brb * (0.35 + Math.random() * 0.85);
-            tx = bx + nx * rr; ty = by + ny * rr;
-            const dist = hMin + Math.random() * hSpan;
-            const tang = (Math.random() - 0.5) * 14;
-            px[i] = Math.max(-hW + 4, Math.min(hW - 4, tx + nx * dist - ny * tang));
-            py[i] = Math.max(-hH + 4, Math.min(hH - 4, ty + ny * dist + nx * tang));
-            arcColor(S, bx, by); this.cr[i] = oR; this.cg[i] = oG; this.cb[i] = oB;
+            fAng = (ab + 0.18 + Math.random() * 0.64) / ARITO_BUCKETS * TWO_PI;
+            fNx = Math.cos(fAng); fNy = Math.sin(fAng);
+            const hDist = hMin + Math.random() * hSpan;
+            fx = bx + fNx * (rp + hDist); fy = by + fNy * (rp + hDist);
           }
+          const cRad = C.gapClusterRadiusMin + Math.random() * (C.gapClusterRadiusMax - C.gapClusterRadiusMin);
+          const curveDir = (Math.random() < 0.5 ? 1 : -1) * (agile ? 1.25 : 1.0);
 
-          this.vx[i] = 0; this.vy[i] = 0;
-          this.tx[i] = tx; this.ty[i] = ty; this.hasTarget[i] = 1;
-          this.phase[i] = 3; this.arrived[i] = 0; this.settle[i] = C.settleTime;
-          this.heat[i] = 0.72; this.emerge[i] = 0.16;
+          for (let m = 0; m < cSize && bCount[b] < bIdeal[b] * 0.96; m++) {
+            let src = -1, bestExcess = 1.04;
+            for (let s = 0; s < TOTAL_BUCKETS; s++) {
+              if (!bActive[s] || bHead[s] < 0 || bIdeal[s] < 1) continue;
+              const ex = bCount[s] / bIdeal[s];
+              if (ex > bestExcess) { bestExcess = ex; src = s; }
+            }
+            if (src < 0) break;
+
+            const i = bHead[src];
+            bHead[src] = bNext[i];
+            bCount[src]--; bCount[b]++;
+
+            let tx, ty;
+            if (!isAritoBucket) {
+              const ang = (b + Math.random()) / RING_BUCKETS * TWO_PI;
+              const rr = R + (Math.random() - 0.5) * 1.45 * rb;
+              tx = Math.cos(ang) * rr; ty = Math.sin(ang) * rr;
+              arcColor(S, tx, ty); this.cr[i] = oR; this.cg[i] = oG; this.cb[i] = oB;
+            } else {
+              const ab = b - RING_BUCKETS;
+              const ang = (ab + Math.random()) / ARITO_BUCKETS * TWO_PI;
+              const rr = rp + brb * (0.35 + Math.random() * 0.85);
+              tx = bx + Math.cos(ang) * rr; ty = by + Math.sin(ang) * rr;
+              arcColor(S, bx, by); this.cr[i] = oR; this.cg[i] = oG; this.cb[i] = oB;
+            }
+
+            // empaquetado dentro del radio compacto del micro-cúmulo (~10–18 px)
+            const oa = Math.random() * TWO_PI, or = Math.sqrt(Math.random()) * cRad;
+            px[i] = Math.max(-hW + 4, Math.min(hW - 4, fx + Math.cos(oa) * or));
+            py[i] = Math.max(-hH + 4, Math.min(hH - 4, fy + Math.sin(oa) * or));
+
+            this.vx[i] = 0; this.vy[i] = 0;
+            this.tx[i] = tx; this.ty[i] = ty; this.hasTarget[i] = 1;
+            this.clusterFlight[i] = 1; this.clusterCurve[i] = curveDir;
+            // ligero escalonamiento temporal (0–65 ms) para estirar el micro-cúmulo como filamento coalescente
+            const delay = (m / Math.max(1, cSize)) * staggerS * (0.7 + 0.3 * Math.random());
+            if (delay > 0.004) {
+              this.phase[i] = 2; this.timer[i] = delay;
+            } else {
+              // empuje inicial con leve curvatura hacia el tramo vacío (1.5× más decidido con arito activo)
+              const dx = tx - px[i], dy = ty - py[i], dl = Math.hypot(dx, dy) || 1;
+              const nx = dx / dl, ny = dy / dl, kick = agile ? 420 : 280;
+              this.vx[i] = nx * kick - ny * curveDir * 170;
+              this.vy[i] = ny * kick + nx * curveDir * 170;
+              this.phase[i] = 3;
+            }
+            this.arrived[i] = 0; this.settle[i] = C.settleTime;
+            this.heat[i] = 0.78; this.emerge[i] = 0.18;
+          }
         }
       } else if (ratio >= 0.94) {
         this.gapAge[b] = 0; this.spawnAcc[b] = 0;
@@ -1060,6 +1145,10 @@ export class ParticleSystem {
       this.material.uniforms.uBhRim.value = 0;
       this.material.uniforms.uBhWarm.value = 0;
       this._extraAlpha = 0;
+      if (this.heroNoBounceTimer > 0) {
+        this.heroNoBounceTimer -= dt;
+        if (this.heroNoBounceTimer <= 0) this.heroNoBounce = false;
+      }
     }
 
     // --- suavizado de unión y cuerda ---
@@ -1072,11 +1161,11 @@ export class ParticleSystem {
     // --- balanceo y regeneración progresiva de huecos (aro + arito) ---
     this._rebalanceGaps(dt);
 
-    // --- volumen objetivo → espaciado y masa de splatting ---
+    // --- volumen objetivo → espaciado y masa de splatting (durante compresión se conserva la densidad creciente del pool) ---
     const area = this._area();
     this.areaSm += (area - this.areaSm) * (1 - Math.exp(-6 * dt));
     const h = Math.max(5, Math.min(16, Math.sqrt(this.areaSm / n) * C.spacingScale));
-    const massScale = this.areaSm / (cs * cs * n) * C.fill;
+    const massScale = (this.areaSm / (cs * cs * n) * C.fill) * (1 + 0.65 * S.charge);
 
     // --- hash espacial O(N) ---
     const hgw = this.hgw, hgh = this.hgh, hStart = this.hStart, hItems = this.hItems, hCell = this.hCell;
@@ -1116,6 +1205,9 @@ export class ParticleSystem {
     const phase = this.phase, timer = this.timer, t1 = this.t1, settle = this.settle, arrived = this.arrived;
     const heat = this.heat, rnd = this.rnd, en = this.en, ccr = this.cr, ccg = this.cg, ccb = this.cb;
     const hasT = this.hasTarget, txA = this.tx, tyA = this.ty, emerge = this.emerge;
+    const clFlight = this.clusterFlight, clCurve = this.clusterCurve;
+    const charge = S.ringActive && !S.isDetail ? S.charge : 0;
+    const c2 = charge * charge, cFreq = 18 + 38 * charge;
     const dragK = Math.pow(C.dispersionDrag, dt * 60), xsphK = C.xsphCohesion * Math.min(1, dt * 60);
     const Kret = C.returnAcceleration, wRet = Math.sqrt(Kret), cRet = 2 * C.returnDamping * wRet;
     const Kset = C.settleStiffness, cSet = 2 * C.settleDamping * Math.sqrt(Kset);
@@ -1174,9 +1266,9 @@ export class ParticleSystem {
             if (r2 >= NR2) continue;
             const r = Math.sqrt(r2) + 1e-4;
             if (r2 < h2) { const f = 1 - r / h; rx += dx / r * f; ry += dy / r * f; }
-            if (ph === 1) {
+            if (ph === 1 || (ph === 3 && clFlight[i])) {
               const w = 1 - r / 18; sw += w; svx += w * vxA[j]; svy += w * vyA[j];
-              if (r < 7) { const f = 1 - r / 7; prx += dx / r * f; pry += dy / r * f; }
+              if (ph === 1 && r < 7) { const f = 1 - r / 7; prx += dx / r * f; pry += dy / r * f; }
             }
           }
         }
@@ -1239,11 +1331,20 @@ export class ParticleSystem {
         if ((sp2 < C.apexSpeed * C.apexSpeed && t1[i] > 0.1) || t1[i] > C.smokeMax) {
           ph = 2; timer[i] = C.apexDelayMs / 1000 * (0.85 + rnd[i] * 0.3);
         }
-      } else if (ph === 2) {                              // pausa en el ápice
+      } else if (ph === 2) {                              // pausa en el ápice (o escalonamiento 0–65 ms de micro-cúmulo)
         vx += ax * dt; vy += ay * dt;
         const k = Math.exp(-14 * dt); vx *= k; vy *= k;
         timer[i] -= dt;
-        if (timer[i] <= 0) { ph = 3; heat[i] = 1; arrived[i] = 0; settle[i] = C.settleTime; }
+        if (timer[i] <= 0) {
+          ph = 3; heat[i] = 1; arrived[i] = 0; settle[i] = C.settleTime;
+          if (clFlight[i] && hasT[i]) {
+            const dx = txA[i] - x, dy = tyA[i] - y, dl = Math.hypot(dx, dy) || 1;
+            const nx = dx / dl, ny = dy / dl, cv = clCurve[i];
+            const kick = Math.abs(cv) > 1.1 ? 420 : 280;
+            vx = nx * kick - ny * cv * 165;
+            vy = ny * kick + nx * cv * 165;
+          }
+        }
       } else {                                            // 0 reposo / 3 regeneración
         if (isDetail) {
           evalRectWaves(this.rectU[i], t);
@@ -1298,6 +1399,19 @@ export class ParticleSystem {
             ay += (tyA[i] - y) * C.detailHoldK;
             vx = (vx + ax * dt) * detRest; vy = (vy + ay * dt) * detRest;
           } else {
+            // energía cinética acumulada durante la compresión reversible al subir hacia ALYSAURIO
+            if (charge > 0.002) {
+              const rLen = Math.hypot(x, y) || 1, rnx = x / rLen, rny = y / rLen;
+              const nRad = Math.sin(t * cFreq + rnd[i] * 73.1) + 0.6 * Math.cos(t * cFreq * 1.73 + i * 1.9);
+              const nTan = Math.cos(t * cFreq * 1.29 + rnd[i] * 51.7) + 0.5 * Math.sin(t * cFreq * 2.11 + i * 2.7);
+              const jAmp = 1450 * c2 + 2500 * c2 * charge;
+              ax += (rnx * nRad - rny * nTan * 0.65) * jAmp;
+              ay += (rny * nRad + rnx * nTan * 0.65) * jAmp;
+              if (charge > 0.60 && Math.random() < (charge - 0.60) * 0.045) {
+                const spk = 280 + 380 * charge;
+                vx += rnx * spk; vy += rny * spk; heat[i] = 1;
+              }
+            }
             if (sd > 0 && sd < 1e8) { const pull = Math.min(sd + 1, 700); ax -= gx * C.holdStiffness * pull; ay -= gy * C.holdStiffness * pull; }
             if (sd > C.relapseDistance && sd < 1e8) { ph = 3; heat[i] = 1; arrived[i] = 0; settle[i] = C.settleTime; }
             vx = (vx + ax * dt) * rest; vy = (vy + ay * dt) * rest;
@@ -1326,12 +1440,17 @@ export class ParticleSystem {
           // FASE 2 simbiótica violenta con freno magnético al 20 % (Aro / Hero / Arito)
           const e = hasT[i] ? sd : (sd + inset);
           ax += rx * C.spacing * 0.35; ay += ry * C.spacing * 0.35;
+          // cohesión XSPH ligera en micro-cúmulos regenerativos → forma gotas/filamentos coalescentes
+          if (clFlight[i] && !arrived[i] && sw > 0.01) {
+            const ck = xsphK * 0.42 * Math.min(1, sw);
+            vx += (svx / sw - vx) * ck; vy += (svy / sw - vy) * ck;
+          }
           let K = Kret, c = cRet;
           if (arrived[i]) { K = Kset; c = cSet; }
           else if (Math.abs(e) < arrR) {
             const vn = vx * gx + vy * gy;
             vx -= gx * vn * (1 - C.magneticBrake); vy -= gy * vn * (1 - C.magneticBrake);
-            arrived[i] = 1; K = Kset; c = cSet;
+            arrived[i] = 1; clFlight[i] = 0; K = Kset; c = cSet;
           }
           const an = -K * (e > 700 ? 700 : e < -700 ? -700 : e);
           vx += (ax + gx * an) * dt; vy += (ay + gy * an) * dt;
@@ -1340,7 +1459,7 @@ export class ParticleSystem {
           vn *= Math.exp(-c * dt);
           const lk = arrived[i] ? 1 : latK;
           vx = ttx * lk + vn * gx; vy = tty * lk + vn * gy;
-          if (arrived[i]) { settle[i] -= dt; if (settle[i] <= 0) { ph = 0; hasT[i] = 0; } }
+          if (arrived[i]) { settle[i] -= dt; if (settle[i] <= 0) { ph = 0; hasT[i] = 0; clFlight[i] = 0; } }
         }
       }
 
@@ -1422,7 +1541,9 @@ export class ParticleSystem {
       }
     }
 
-    const out = this.gridData, flick = (t * 7) | 0, size = gw * gh;
+    const out = this.gridData, size = gw * gh;
+    const ch = S.ringActive && !S.isDetail ? S.charge : 0;
+    const flick = (t * (7 + 48 * ch * ch)) | 0;
     const boxOn = S.boxOn && S.boxD > 0.001;
     const bandW = Math.max(1, 2 * S.brb);
     for (let gi = 0; gi < size; gi++) {
@@ -1446,11 +1567,23 @@ export class ParticleSystem {
         L *= 1 + (p - 1) * S.boxD;
         E = Math.min(1, E + (wCol * 0.42 + wSum * 0.06) * S.boxD);
       }
+      let flash = 0;
+      if (ch > 0.005) {
+        // mutación frenética de glifos hacia x # % @ + calentamiento incandescente pulsante irregular
+        const wx = ((gi % gw) + 0.5) * cs - hW, wy = hH - (((gi / gw) | 0) + 0.5) * cs;
+        const ang = Math.atan2(wy, wx);
+        const p1 = Math.sin(ang * 3.0 + t * 9.5) * Math.sin(ang * 5.0 - t * 13.2);
+        const p2 = Math.cos(ang * 7.0 - t * 17.4 + hs * 2.4);
+        const hot = Math.max(0, 0.5 + 0.5 * (p1 * 0.6 + p2 * 0.4));
+        flash = Math.min(1, ch * ch * (0.42 + 0.88 * hot * hot) + (ch > 0.72 ? (ch - 0.72) * 1.4 : 0));
+        E = Math.min(1, E + flash * 0.85);
+      }
       L *= 1 + 0.5 * E;
       let f = (L - 0.05) / 1.5; f = f < 0 ? 0 : f > 1 ? 1 : f;
-      let gl = Math.pow(f, 0.85) * 8.99 + E * 1.5; if (gl > 8.99) gl = 8.99;
+      let gl = Math.pow(f, 0.85) * 8.99 + E * 1.5 + (ch > 0.005 ? ch * (1.6 + 2.6 * hs) : 0);
+      if (gl > 8.99) gl = 8.99;
       let al = (L - 0.03) / 0.19; al = al < 0 ? 0 : al > 1 ? 1 : al; al = al * al * (3 - 2 * al);
-      const white = Math.min(1, E * 1.35);
+      const white = Math.min(1, Math.max(E * 1.35, flash));
       out[o] = Dr[gi] * inv + (1 - Dr[gi] * inv) * white;
       out[o + 1] = Dg[gi] * inv + (1 - Dg[gi] * inv) * white;
       out[o + 2] = Db[gi] * inv + (1 - Db[gi] * inv) * white;
