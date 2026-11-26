@@ -174,8 +174,23 @@ function start(projects, canvas, gl2, FONT) {
       ps.clearExplicitTargets();
       cursorWasInsideRect = false;
     } else if (s === STATE.ABOUT_DIVIDER) {
+      updateAboutBounds();
+      ps.distributeCandle(aboutHalfL, aboutMidY);
+    } else if (prev === STATE.ABOUT_DIVIDER) {
       ps.clearExplicitTargets();
     }
+  }
+
+  let aboutHalfL = 240, aboutMidY = 0;
+  function updateAboutBounds() {
+    // anclaje preciso justo sobre SCROLL ↑ (scrollRect.top - 18, respaldo seguro H - 82 px)
+    const rect = scrollHint ? scrollHint.getBoundingClientRect() : null;
+    const baseCss = (rect && rect.height > 1 && rect.top > 40) ? Math.min(H - 82, rect.top - 18) : (H - 82);
+    const topCss = H * 0.11;
+    const flameBaseY = H * 0.5 - baseCss;
+    const flameTopY = H * 0.5 - topCss;
+    aboutHalfL = Math.max(90, (flameTopY - flameBaseY) * 0.5);
+    aboutMidY = (flameTopY + flameBaseY) * 0.5;
   }
 
   function resize() {
@@ -186,6 +201,7 @@ function start(projects, canvas, gl2, FONT) {
     bgMat.uniforms.uRes.value.set(W, H);
     ps.resize(W, H, dpr);
     ps.buildTextField('ALYSAURIO', FONT);
+    updateAboutBounds();
     previewEl.dataset.id = ''; textPosInit = false;
     onScroll();
   }
@@ -750,16 +766,13 @@ function start(projects, canvas, gl2, FONT) {
 
     const curInsideRect = state === STATE.DETAIL_RECT && detailP > 0.85 && cur.valid && cursorInsideBox();
 
-    // límites verticales limpios de la columna ABOUT_DIVIDER (~9 % superior, ≥82 px sobre el borde inferior para librar SCROLL ↑)
-    const aboutTop = H * 0.5 - Math.max(44, H * 0.09);
-    const aboutBot = -H * 0.5 + Math.max(82, H * 0.095);
-    const aboutL = state === STATE.ABOUT_DIVIDER ? Math.max(80, (aboutTop - aboutBot) * 0.5) : 0;
-    const aboutY = (aboutTop + aboutBot) * 0.5;
+    // límites verticales anclados sobre SCROLL ↑ (calculados en updateAboutBounds)
+    const aboutL = state === STATE.ABOUT_DIVIDER ? aboutHalfL : 0;
 
     ps.setTargets({
       mode: state === STATE.HERO_TEXT ? 0 : 1,
       R, rb: RING_RB, arcs, colors: colorsRef, box, junction: jn,
-      lineL: aboutL, lineY: aboutY, lrb: 13,
+      lineL: aboutL, lineY: aboutMidY, lrb: 16,
       enabled: RING_STATES.has(state),
       pusher,
       ringActive: RING_STATES.has(state),

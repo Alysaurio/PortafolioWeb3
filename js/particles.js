@@ -170,6 +170,17 @@ function evalRectWaves(u, t) {
   wCol = Math.min(1.4, fwd * bwd * 2.9);
 }
 
+/* ---------- Envolvente volumétrica de llama de vela: bulbo lleno en la base (u ≈ 0.16) → punta fina (u → 1) ---------- */
+function candleHalfWidth(u) {
+  u = u < 0 ? 0 : u > 1 ? 1 : u;
+  if (u <= 0.16) {
+    const s = u / 0.16;
+    return 30.0 * (0.26 + 0.74 * Math.pow(Math.sin(s * HALF_PI), 0.65));
+  }
+  const q = (u - 0.16) / 0.84;
+  return 3.2 + 26.8 * Math.pow(1 - q, 1.38);
+}
+
 /* ------------------------- SDF de la escena ------------------------- */
 let tSd = 0, tGx = 0, tGy = 1, tComp = -1;
 
@@ -205,16 +216,14 @@ function sdfScene(S, x, y) {
   }
   if (S.L > 2) {
     const yLoc = y - S.lineY;
-    let f = (yLoc + S.ropeH) / (2 * S.ropeH) * (ROPE_N - 1);
-    f = f < 0 ? 0 : f > ROPE_N - 1.001 ? ROPE_N - 1.001 : f;
+    const u = (yLoc + S.L) / (2 * S.L);
+    let f = (u < 0 ? 0 : u > 1 ? 1 : u) * (ROPE_N - 1);
+    if (f > ROPE_N - 1.001) f = ROPE_N - 1.001;
     const i0 = f | 0, fr = f - i0;
     const off = S.ro[i0] * (1 - fr) + S.ro[i0 + 1] * fr;
-    // ahusamiento suave en ambos extremos (especialmente punta superior tipo llama de vela)
-    let tTop = (S.L - yLoc) / 48; tTop = tTop < 0 ? 0 : tTop > 1 ? 1 : tTop; tTop = 0.24 + 0.76 * tTop * tTop * (3 - 2 * tTop);
-    let tBot = (S.L + yLoc) / 36; tBot = tBot < 0 ? 0 : tBot > 1 ? 1 : tBot; tBot = 0.34 + 0.66 * tBot * tBot * (3 - 2 * tBot);
-    const lrbEff = S.lrb * (tTop < tBot ? tTop : tBot);
+    const hw = candleHalfWidth(u);
     const ex = Math.abs(x - off), ay = Math.abs(yLoc) - S.L, ey = ay > 0 ? ay : 0;
-    const dd = Math.sqrt(ex * ex + ey * ey) - lrbEff;
+    const dd = Math.sqrt(ex * ex + ey * ey) - hw;
     if (dd < d) { d = dd; tComp = 3; }
   }
   return d;
@@ -700,6 +709,25 @@ export class ParticleSystem {
 
   clearExplicitTargets() { this.hasTarget.fill(0); }
 
+  /** Distribuye objetivos iniciales sesgados hacia el bulbo inferior (u = t^1.55 → ~64 % en la mitad inferior). */
+  distributeCandle(halfL, midY) {
+    const n = this.n, flameBaseY = midY - halfL, flameH = Math.max(10, 2 * halfL);
+    for (let i = 0; i < n; i++) {
+      const tNorm = (i + Math.random()) / n;
+      const u = Math.pow(tNorm, 1.55);
+      const hw = candleHalfWidth(u);
+      const rLat = (Math.random() * 2 - 1) * Math.sqrt(Math.random()) * hw * 0.92;
+      this.tx[i] = rLat;
+      this.ty[i] = flameBaseY + u * flameH;
+      this.hasTarget[i] = 1;
+      this.phase[i] = 3;
+      this.arrived[i] = 0;
+      this.heat[i] = 0.55;
+      this.emerge[i] = 1;
+    }
+    this.ropeO.fill(0); this.ropeV.fill(0); this.ropeE.fill(0);
+  }
+
   /* ==================== AGUJERO NEGRO EN HERO_TEXT ==================== */
   startBlackHole(x, y) {
     const bh = this.bh;
@@ -897,16 +925,15 @@ export class ParticleSystem {
         }
       }
     }
-    // amortiguamiento alto (casi crítico) + restauración rápida (~1.8×) + convección ascendente de llama de vela
+    // amortiguamiento alto (casi crítico) + restauración rápida + oscilación sutil más notoria arriba que en la base firme
     const damp = Math.exp(-11.5 * h);
     for (let s = 0; s < steps; s++) {
       for (let k = 1; k < n - 1; k++) {
         const u = k / (n - 1);
-        const env = Math.sin(u * Math.PI);
-        // micro-ondulación térmica ascendente en reposo (fluye de abajo hacia arriba como llama tranquila)
-        const idle = (Math.sin(u * 6.5 - t * 2.4) * 2.2 + Math.sin(u * 11.3 - t * 3.7) * 1.1) * env;
+        const swayEnv = Math.pow(u, 1.35); // base firme (u ≈ 0), lengua superior con suave vaivén de vela
+        const idle = (Math.sin(u * 6.2 - t * 2.5) * 4.8 + Math.sin(u * 10.8 - t * 3.9) * 2.1) * swayEnv;
         const lap = c2 * (o[k - 1] + o[k + 1] - 2 * o[k]);
-        const advectUp = (o[k - 1] - o[k]) * 18; // arrastre ascendente suave hacia la punta de la vela
+        const advectUp = (o[k - 1] - o[k]) * 20; // convección ascendente hacia la punta de la vela
         v[k] += (lap + advectUp - 42 * (o[k] - idle)) * h;
       }
       for (let k = 1; k < n - 1; k++) {
@@ -915,7 +942,9 @@ export class ParticleSystem {
         if (o[k] > maxX) { o[k] = maxX; v[k] *= 0.25; }
         else if (o[k] < -maxX) { o[k] = -maxX; v[k] *= 0.25; }
       }
-      o[0] = o[n - 1] = 0; v[0] = v[n - 1] = 0;
+      o[0] = 0; v[0] = 0;
+      // punta superior libre pero contenida (sigue con suavidad al nodo inferior)
+      o[n - 1] = o[n - 2] * 0.96; v[n - 1] = v[n - 2] * 0.9;
     }
   }
 
@@ -1521,10 +1550,10 @@ export class ParticleSystem {
     const aritoBarrier = !isDetail && S.boxOn && S.vidR > 1;
     const aboutOn = S.mode === 1 && !S.ringActive && !isDetail && S.L > 2;
     const aboutTouch = aboutOn && cur.valid && curSl > 0.5 && curSp > 35;
-    const aboutMaxX = 76;
-    const aboutYMin = S.lineY - S.L - 6, aboutYMax = S.lineY + S.L + 16;
-    const aboutRetK = 380, aboutRetC = 2 * 1.05 * Math.sqrt(aboutRetK);
-    const aboutHoldDamp = Math.exp(-12.5 * dt);
+    const aboutMaxX = 74;
+    const flameBaseY = S.lineY - S.L, flameTopY = S.lineY + S.L, flameH = Math.max(10, 2 * S.L);
+    const aboutRetK = 360, aboutRetC = 2 * 1.05 * Math.sqrt(aboutRetK);
+    const aboutHoldDamp = Math.exp(-10.5 * dt);
     const ropeO = this.ropeO, ropeE = this.ropeE;
     const sxHalfW = Math.max(220, this.textHalfW * 1.15), sxHalfH = Math.max(90, H * 0.22);
     const bhTemp = this.bhTemp, heroCk = 1 - Math.exp(-7.5 * dt);
@@ -1746,7 +1775,7 @@ export class ParticleSystem {
           const dx = x - txA[i], dy = y - tyA[i], dist = Math.sqrt(dx * dx + dy * dy);
           sd = dist;
           if (dist > 1e-4) { gx = dx / dist; gy = dy / dist; } else { gx = 0; gy = 1; }
-          comp = isDetail ? 1 : (S.mode === 0 ? 4 : 0);
+          comp = isDetail ? 1 : (aboutOn ? 3 : (S.mode === 0 ? 4 : 0));
         } else {
           this._eval(x, y, ph === 3);
           sd = tSd; gx = tGx; gy = tGy; comp = tComp;
@@ -1813,14 +1842,14 @@ export class ParticleSystem {
             ccr[i] = rr; ccg[i] = gg; ccb[i] = bb;
           } else if (comp === 3) {
             // columna llama de vela (ABOUT_DIVIDER): variación cromática caótica cálido/frío modulada por agitación
-            const yLoc = y - S.lineY;
-            const yNorm = Math.max(0, Math.min(1, (yLoc + S.L) / Math.max(1, 2 * S.L)));
-            let rf = (yLoc + S.ropeH) / (2 * S.ropeH) * (ROPE_N - 1);
-            rf = rf < 0 ? 0 : rf > ROPE_N - 1.001 ? ROPE_N - 1.001 : rf;
-            const ri = rf | 0;
-            const distAxis = Math.abs(x - ropeO[ri]);
-            const distFrac = Math.min(1.2, distAxis / Math.max(1, S.lrb));
-            const agit = Math.min(1, Math.max(ropeE[ri], Math.min(1, Math.hypot(vx, vy) / 480) * 0.85, ph === 3 ? 0.45 : 0));
+            const yNorm = Math.max(0, Math.min(1, (y - flameBaseY) / flameH));
+            let rf = yNorm * (ROPE_N - 1);
+            if (rf > ROPE_N - 1.001) rf = ROPE_N - 1.001;
+            const ri = rf | 0, rfr = rf - ri;
+            const spX = ropeO[ri] * (1 - rfr) + ropeO[ri + 1] * rfr;
+            const hwL = candleHalfWidth(yNorm);
+            const distFrac = Math.min(1.25, Math.abs(x - spX) / Math.max(3, hwL));
+            const agit = Math.min(1, Math.max(ropeE[ri], Math.min(1, Math.hypot(vx, vy) / 480) * 0.85, (ph === 3 && !hasT[i]) ? 0.45 : 0));
             evalCandleColor(x, y, yNorm, distFrac, agit, t);
             ccr[i] = cdR; ccg[i] = cdG; ccb[i] = cdB;
             waveE = agit * 0.42;
@@ -1855,15 +1884,27 @@ export class ParticleSystem {
             ay += (tyA[i] - y) * C.detailHoldK;
             vx = (vx + ax * dt) * detRest; vy = (vy + ay * dt) * detRest;
           } else if (aboutOn) {
-            // reposo tipo llama de vela: convección ascendente suave + restauración horizontal ágil sin rebote
-            ay += 32 * (0.4 + 0.6 * rnd[i]) * Math.sin(t * 2.2 + y * 0.03 + rnd[i] * 6.28);
-            if (sd > 0 && sd < 1e8) {
-              const pull = Math.min(sd + 1, 500);
-              ax -= gx * C.holdStiffness * 1.85 * pull;
-              ay -= gy * C.holdStiffness * 1.35 * pull;
+            // flujo térmico ascendente continuo (lento y denso en bulbo inferior → rápido y fino hacia la punta)
+            const uNow = Math.max(0, Math.min(1, (y - flameBaseY) / flameH));
+            let rf = uNow * (ROPE_N - 1); if (rf > ROPE_N - 1.001) rf = ROPE_N - 1.001;
+            const ri = rf | 0, rfr = rf - ri;
+            const spX = ropeO[ri] * (1 - rfr) + ropeO[ri + 1] * rfr;
+            const hwNow = candleHalfWidth(uNow);
+            const dxAx = x - spX, absDx = Math.abs(dxAx);
+            // velocidad ascendente creciente con u → conservación de masa mantiene ~62–64 % del volumen en la mitad inferior
+            const vRise = (52 + 122 * Math.pow(uNow, 1.35)) * (0.82 + 0.36 * rnd[i]);
+            ay += (vRise - vy) * 5.4;
+            // contención lateral en lágrima (sin rebote elástico) + ligero vaivén en la lengua superior
+            ax += Math.sin(t * 3.1 - uNow * 7.5 + rnd[i] * 6.28) * (12 + 62 * uNow * uNow);
+            if (absDx > hwNow) {
+              ax -= (dxAx > 0 ? 1 : -1) * (absDx - hwNow) * 260;
+            } else {
+              ax -= dxAx * (10 + 34 * uNow * uNow);
             }
-            if (sd > 22 && sd < 1e8) { ph = 3; heat[i] = 0.7; arrived[i] = 0; settle[i] = 0.24; }
-            vx = (vx + ax * dt) * aboutHoldDamp; vy = (vy + ay * dt) * aboutHoldDamp;
+            // espaciado suave solo dentro del bulbo para volumen orgánico uniforme
+            ax += rx * C.spacing * 0.32; ay += ry * C.spacing * 0.16;
+            vx = (vx + ax * dt) * aboutHoldDamp;
+            vy = (vy + ay * dt) * Math.exp(-3.2 * dt);
           } else {
             // energía cinética acumulada durante la compresión reversible al subir hacia ALYSAURIO
             if (charge > 0.002) {
@@ -1885,8 +1926,8 @@ export class ParticleSystem {
         } else if (sd >= 1e8) {
           vx *= rest; vy *= rest;
         } else if (aboutOn) {
-          // retorno rápido y sobreamortiguado hacia el eje vertical de la llama de vela (cero rebote elástico)
-          ax += rx * C.spacing * 0.28; ay += ry * C.spacing * 0.28 + 85;
+          // retorno rápido y sobreamortiguado hacia la silueta de llama (con flujo ascendente si ya no viene del aro)
+          ax += rx * C.spacing * 0.22; ay += ry * C.spacing * 0.18 + (hasT[i] ? 0 : 95);
           const an = -aboutRetK * Math.min(sd, 480);
           vx += (ax + gx * an) * dt; vy += (ay + gy * an) * dt;
           let vn = vx * gx + vy * gy;
@@ -1894,7 +1935,7 @@ export class ParticleSystem {
           vn *= Math.exp(-aboutRetC * dt);
           const lk = Math.exp(-9.5 * dt);
           vx = ttx * lk + vn * gx; vy = tty * lk + vn * gy;
-          if (sd < 4.5) { ph = 0; arrived[i] = 1; }
+          if (sd < (hasT[i] ? 16 : 5.5)) { ph = 0; arrived[i] = 1; hasT[i] = 0; }
         } else if (isDetail || (S.mode === 0 && this.heroNoBounce)) {
           // FASE 2 sobreamortiguada: DETAIL_RECT y restauración de agujero negro (encaja en seco sin elasticidad ni rebotes)
           ax += rx * C.spacing * 0.25; ay += ry * C.spacing * 0.25;
@@ -1968,12 +2009,25 @@ export class ParticleSystem {
         }
       }
 
-      // contención estricta en el viewport (y límite horizontal seguro de ABOUT_DIVIDER contra invasión de textos)
+      // reciclaje térmico continuo + anclaje estricto sobre SCROLL ↑ + límite horizontal seguro en ABOUT_DIVIDER
       if (aboutOn) {
         if (x < -aboutMaxX) { x = -aboutMaxX; vx = Math.abs(vx) * 0.2; }
         else if (x > aboutMaxX) { x = aboutMaxX; vx = -Math.abs(vx) * 0.2; }
-        if (y < aboutYMin) { y = aboutYMin; vy = Math.abs(vy) * 0.3; }
-        else if (y > aboutYMax) { y = aboutYMax; vy = -Math.abs(vy) * 0.2; }
+        if (y >= flameTopY) {
+          // recicla al instante de vuelta al nacimiento en la base (u ∈ [0, 0.06]) con fade-in rápido (cero cúmulo arriba)
+          const uNew = Math.random() * 0.06;
+          y = flameBaseY + uNew * flameH;
+          const hw0 = candleHalfWidth(uNew);
+          const sp0 = ropeO[Math.min(ROPE_N - 1, (uNew * (ROPE_N - 1)) | 0)];
+          x = sp0 + (Math.random() * 2 - 1) * hw0 * 0.86;
+          vx = (Math.random() - 0.5) * 16; vy = 32 + Math.random() * 24;
+          ph = 0; arrived[i] = 1; hasT[i] = 0; heat[i] = 0; puff[i] = 0; emerge[i] = 0.04;
+          evalCandleColor(x, y, uNew, Math.abs(x - sp0) / Math.max(3, hw0), 0, t);
+          ccr[i] = cdR; ccg[i] = cdG; ccb[i] = cdB;
+        } else if (y < flameBaseY - 2) {
+          y = flameBaseY - 2;
+          if (vy < 22) vy = 22 + Math.random() * 14;
+        }
       }
       if (x < -hW + 1) { x = -hW + 1; vx = Math.abs(vx) * 0.4; } else if (x > hW - 1) { x = hW - 1; vx = -Math.abs(vx) * 0.4; }
       if (y < -hH + 1) { y = -hH + 1; vy = Math.abs(vy) * 0.4; } else if (y > hH - 1) { y = hH - 1; vy = -Math.abs(vy) * 0.4; }
@@ -1996,12 +2050,25 @@ export class ParticleSystem {
     const w25 = this._w25 || (this._w25 = new Float32Array(25));
     const px = this.px, py = this.py, emerge = this.emerge, puff = this.puff;
     const puffSpan = Math.max(0.2, C.smokeMaxSplatRadius - 1.0);
+    const aboutSplat = S.mode === 1 && !S.ringActive && !S.isDetail && S.L > 2;
+    const flameBaseY = S.lineY - S.L, flameH = Math.max(10, 2 * S.L);
 
     for (let i = 0; i < n; i++) {
       // origen superior-izquierdo unificado con BG_FS y GRID_FS
       const gx = (px[i] + hW) / cs, gy = (hH - py[i]) / cs, cx = Math.floor(gx), cy = Math.floor(gy);
       const pf = S.ringActive && !S.isDetail ? puff[i] : 0;
       const e = this.en[i], r = this.cr[i], g = this.cg[i], b = this.cb[i];
+      let emW = emerge[i];
+      if (aboutSplat) {
+        // desvanecimiento suave en el tramo superior (u > 0.85 → 1.0) antes de reciclarse a la base
+        const uP = (py[i] - flameBaseY) / flameH;
+        if (uP >= 1.0) continue;
+        if (uP > 0.85) {
+          const ft = (1.0 - uP) / 0.15;
+          emW *= ft * ft * (3 - 2 * ft);
+          if (emW < 0.01) continue;
+        }
+      }
       if (pf <= 0.05) {
         // estado cohesionado: splatRadius = 1.0 (huella compacta 3×3 nítida)
         let sum = 0, q = 0;
@@ -2009,7 +2076,7 @@ export class ParticleSystem {
           const dx = gx - (cx + ox + 0.5), dy = gy - (cy + oy + 0.5);
           const w = Math.exp(-(dx * dx + dy * dy) * inv2s); w9[q] = w; sum += w;
         }
-        const inv = emerge[i] / sum;
+        const inv = emW / sum;
         q = 0;
         for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++, q++) {
           const xx = cx + ox, yy = cy + oy;
@@ -2062,7 +2129,6 @@ export class ParticleSystem {
     const boxOn = S.boxOn && S.boxD > 0.001;
     const bandW = Math.max(1, 2 * S.brb);
     const heroSm = this.heroModeSm;
-    const aboutSplat = S.mode === 1 && !S.ringActive && !S.isDetail && S.L > 2;
     const bhFireMul = this.bh.active ? 0.30 : (this.bh.releasing ? (0.30 + 1.05 * Math.min(1, this.bh.relTime / 0.85)) : (aboutSplat ? 0.44 : 1.35));
     const spTime = t * 3.1;
 
@@ -2099,13 +2165,13 @@ export class ParticleSystem {
         E = Math.min(1, E + flash * 0.85);
       }
       if (aboutSplat) {
-        // ahusamiento suave de densidad en los últimos ~35 px de ambos extremos (punta de llama + despeje sobre SCROLL ↑)
-        const wy = hH - (((gi / gw) | 0) + 0.5) * cs - S.lineY;
-        const dTop = S.L - wy, dBot = S.L + wy;
-        let taper = 1;
-        if (dTop < 40) { let u = dTop / 40; u = u < 0 ? 0 : u > 1 ? 1 : u; taper *= 0.25 + 0.75 * u * u * (3 - 2 * u); }
-        if (dBot < 36) { let u = dBot / 36; u = u < 0 ? 0 : u > 1 ? 1 : u; taper *= 0.22 + 0.78 * u * u * (3 - 2 * u); }
-        L *= taper;
+        // preserva el bulbo denso en la base y afina orgánicamente solo la punta superior hacia . : ;
+        const wy = hH - (((gi / gw) | 0) + 0.5) * cs;
+        const uG = (wy - flameBaseY) / flameH;
+        if (uG > 0.78) {
+          let ft = (1.0 - uG) / 0.22; ft = ft < 0 ? 0 : ft > 1 ? 1 : ft;
+          L *= 0.18 + 0.82 * ft * ft * (3 - 2 * ft);
+        }
       }
       L *= 1 + 0.5 * E;
       let f = (L - 0.05) / 1.5; f = f < 0 ? 0 : f > 1 ? 1 : f;
