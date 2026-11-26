@@ -82,7 +82,7 @@ function start(projects, canvas, gl2, FONT) {
       uMix: { value: 0 }, uRes: { value: new THREE.Vector2(1, 1) }, uDpr: { value: dpr }, uTime: { value: 0 },
       uBgAmt: { value: 1 }, uSimplify: { value: 1 }, uBase: { value: new THREE.Vector3(...BASE_BG) },
       uTint: { value: new THREE.Vector3(...BASE_BG) }, uTintAmt: { value: 0 }, uVAspect: { value: 16 / 9 },
-      uBlackout: { value: 0 },
+      uBlackHolePos: { value: new THREE.Vector2(0.5, 0.5) }, uBlackHolePull: { value: 0 },
     },
   });
   const bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat);
@@ -130,8 +130,8 @@ function start(projects, canvas, gl2, FONT) {
 
   // estado del agujero negro en HERO_TEXT
   let bhMode = 'idle';          // 'idle' | 'active' | 'restoring'
-  let bhClimax = false;
-  let bhBlackout = 0;           // 0 → normal, 1 → vacío #000000
+  let bhBgSpawned = false, bhDomCaptured = false;
+  let bhPull = 0;               // 0 → normal, 1 → vórtice/succión total del fondo ASCII hacia #000000
   let bhDomAlpha = 1;           // opacidad multiplicativa de #hero-sub y #scroll-hint
 
   const cur = { x: 0, y: 0, px: 0, py: 0, sx: 0, sy: 0, vx: 0, vy: 0, speed: 0, valid: false };
@@ -180,11 +180,10 @@ function start(projects, canvas, gl2, FONT) {
   window.addEventListener('scroll', onScroll, { passive: true });
 
   /* ===================== AGUJERO NEGRO EN HERO_TEXT ===================== */
-  /** Muestrea el fotograma actual del fondo ASCII (~600–850 partículas réplica) y rasteriza los textos HTML de portada. */
-  function spawnHeroClimaxReplicas() {
+  /** Pre-muestrea el fondo ASCII actual a la MISMA escala de celda para desprenderlo progresivamente con el vórtice. */
+  function spawnHeroBgReplicas() {
     const out = [];
-    // 1) Réplica del fondo ASCII actual
-    const gw = 36, gh = 21;
+    const gw = 38, gh = 22;
     const cv = document.createElement('canvas'); cv.width = gw; cv.height = gh;
     const g = cv.getContext('2d', { willReadFrequently: true });
     let dataA = null, dataB = null;
@@ -203,34 +202,39 @@ function start(projects, canvas, gl2, FONT) {
       const nx = (x + 0.5) / gw, ny = (y + 0.5) / gh;
       const vig = 1 - 0.45 * smooth(0.35, 0.95, Math.hypot(nx - 0.5, (ny - 0.5) * 0.9) * 1.6);
       const lum = (0.299 * r + 0.587 * gg + 0.114 * b) * vig;
-      if (lum < 0.05) continue;
+      if (lum < 0.045) continue;
+      // peso y color a la misma escala visual ASCII del fondo original (con ligero realce al girar hacia el disco)
       out.push({
         x: (nx - 0.5) * W, y: (0.5 - ny) * H,
-        r: Math.min(1, r * 0.65 + 0.06), g: Math.min(1, gg * 0.65 + 0.06), b: Math.min(1, b * 0.65 + 0.06),
-        w: clamp(lum * 0.55, 0.08, 0.42),
+        r: Math.min(1, r * 0.85 + 0.08), g: Math.min(1, gg * 0.85 + 0.08), b: Math.min(1, b * 0.85 + 0.08),
+        w: clamp(lum * 1.55, 0.45, 1.32),
       });
     }
+    ps.addExtraParticles(out, false);   // inactivas hasta que el frente de succión del vórtice las desprenda
+  }
 
-    // 2) Rasterización de los textos HTML de la portada (#hero-sub y #scroll-hint) en su posición exacta
-    const textPts = [];
+  /** Rasteriza subtítulo y SCROLL ↓ en sus coordenadas reales en pantalla y los oculta inmediatamente del DOM. */
+  function spawnHeroTextReplicas() {
+    const out = [];
     const rasterEl = (el, maxPts) => {
       const rect = el.getBoundingClientRect();
       if (rect.width < 2 || rect.height < 2) return;
       const cs = getComputedStyle(el);
       const tc = document.createElement('canvas');
-      tc.width = Math.ceil(rect.width); tc.height = Math.ceil(rect.height);
+      tc.width = Math.ceil(rect.width + 12); tc.height = Math.ceil(rect.height + 8);
       const tg = tc.getContext('2d', { willReadFrequently: true });
       tg.fillStyle = cs.color || '#9A9A9A';
       tg.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      if ('letterSpacing' in tg && cs.letterSpacing && cs.letterSpacing !== 'normal') tg.letterSpacing = cs.letterSpacing;
       tg.textAlign = 'center'; tg.textBaseline = 'top';
-      const fs = parseFloat(cs.fontSize) || 14;
+      const fs = parseFloat(cs.fontSize) || 16;
       const lh = parseFloat(cs.lineHeight) || fs * 1.5;
       const words = (el.textContent || '').trim().split(/\s+/);
       const lines = [];
       let line = '';
       for (const w of words) {
         const test = line ? `${line} ${w}` : w;
-        if (line && tg.measureText(test).width > tc.width - 4) { lines.push(line); line = w; }
+        if (line && tg.measureText(test).width > rect.width) { lines.push(line); line = w; }
         else line = test;
       }
       if (line) lines.push(line);
@@ -238,19 +242,27 @@ function start(projects, canvas, gl2, FONT) {
       lines.forEach((ln, idx) => tg.fillText(ln, tc.width * 0.5, startY + idx * lh));
       const d = tg.getImageData(0, 0, tc.width, tc.height).data;
       const pts = [];
-      const step = 5;
+      const step = 4;
       for (let py = 0; py < tc.height; py += step) for (let px = 0; px < tc.width; px += step) {
         const a = d[(py * tc.width + px) * 4 + 3];
-        if (a > 65) pts.push({ x: rect.left + px - W * 0.5, y: H * 0.5 - (rect.top + py), r: 0.72, g: 0.72, b: 0.74, w: 0.55 });
+        if (a > 60) {
+          pts.push({
+            x: rect.left - 6 + px - W * 0.5,
+            y: H * 0.5 - (rect.top - 4 + py),
+            r: 0.78, g: 0.78, b: 0.80, w: 0.78,
+          });
+        }
       }
       const stride = pts.length > maxPts ? pts.length / maxPts : 1;
-      for (let i = 0; i < pts.length; i += stride) textPts.push(pts[i | 0]);
+      for (let i = 0; i < pts.length; i += stride) out.push(pts[i | 0]);
     };
     rasterEl(heroSub, 340);
-    rasterEl(scrollHint, 90);
-    for (const p of textPts) out.push(p);
-
-    ps.addExtraParticles(out);
+    rasterEl(scrollHint, 120);
+    ps.addExtraParticles(out, true);
+    // oculta ambos nodos DOM con prioridad estricta (detiene la animación CSS @keyframes hint de SCROLL ↓)
+    bhDomAlpha = 0;
+    bodyEl.classList.add('bh-hide-dom');
+    scrollHint.style.animation = 'none';
   }
 
   function releaseBlackHole() {
@@ -275,7 +287,7 @@ function start(projects, canvas, gl2, FONT) {
     if (state === STATE.HERO_TEXT && scrollP < 0.08 && bhMode === 'idle') {
       if (e.target && e.target.closest && e.target.closest('a,button')) return;
       cur.x = e.clientX - W / 2; cur.y = H / 2 - e.clientY; cur.sx = e.clientX; cur.sy = e.clientY; cur.valid = true;
-      bhMode = 'active'; bhClimax = false;
+      bhMode = 'active'; bhBgSpawned = false; bhDomCaptured = false;
       bodyEl.classList.add('bh-active');
       ps.startBlackHole(cur.x, cur.y);
     }
@@ -331,30 +343,36 @@ function start(projects, canvas, gl2, FONT) {
     return a.r >= MIN_VIDEO_PX && Math.hypot(cur.x - a.x, cur.y - a.y) < a.r;
   }
 
-  /* --- texto dentro de la cavidad libre del aro, opuesto a theta_preview actual --- */
+  /* --- texto dentro de la cavidad libre del aro, opuesto a theta_preview actual (soporta títulos largos multilínea +2 px) --- */
   function cavityLayout(id, theta, aritoR) {
     const dx = Math.cos(theta), dy = Math.sin(theta);
     const ax = dx * R, ay = dy * R;
-    const fsT = clamp(R * 0.085, 13, 26), fsC = clamp(R * 0.04, 10.5, 14);
     const title = projects[id].title || '', concept = projects[id].shortConcept || '';
+    const maxWord = title.split(/\s+/).reduce((m, w) => Math.max(m, w.length), 1);
     const inner = R - RING_RB - 16;
     const aritoClear = aritoR + PREVIEW_RB + 16;
-    let best = null;
-    for (let wb = R * 1.28; wb >= R * 0.42 && !best; wb -= R * 0.04) {
-      if (title.length * fsT * 0.86 > wb) continue;
-      const lines = Math.min(3, Math.max(1, Math.ceil(concept.length * fsC * 0.62 / wb)));
-      const hb = fsT * 1.4 + 8 + lines * fsC * 1.55;
-      for (let s = 0; s <= R * 0.72 && !best; s += R * 0.03) {
-        const cx = -dx * s, cy = -dy * s;
-        let ok = true;
-        for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
-          const x = cx + sx * wb / 2, y = cy + sy * hb / 2;
-          if (Math.hypot(x, y) > inner || Math.hypot(x - ax, y - ay) < aritoClear) ok = false;
+    const baseT = clamp(R * 0.088 + 2, 15, 27);
+    const baseC = clamp(R * 0.042 + 2, 12.5, 15.5);
+
+    for (let scale = 1.0; scale >= 0.72; scale -= 0.08) {
+      const fsT = baseT * scale, fsC = Math.max(12, baseC * (0.5 + 0.5 * scale));
+      for (let wb = R * 1.26; wb >= R * 0.48; wb -= R * 0.04) {
+        if (maxWord * fsT * 0.66 > wb && scale > 0.75) continue;
+        const tLines = Math.max(1, Math.ceil((title.length * fsT * 0.68) / wb));
+        const cLines = Math.min(4, Math.max(1, Math.ceil((concept.length * fsC * 0.62) / wb)));
+        const hb = tLines * fsT * 1.32 + 10 + cLines * fsC * 1.52;
+        for (let s = 0; s <= R * 0.74; s += R * 0.03) {
+          const cx = -dx * s, cy = -dy * s;
+          let ok = true;
+          for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
+            const x = cx + sx * wb / 2, y = cy + sy * hb / 2;
+            if (Math.hypot(x, y) > inner || Math.hypot(x - ax, y - ay) < aritoClear) ok = false;
+          }
+          if (ok) return { cx, cy, w: wb, fsT, fsC };
         }
-        if (ok) best = { cx, cy, w: wb, fsT, fsC };
       }
     }
-    return best || { cx: -dx * R * 0.35, cy: -dy * R * 0.35, w: R * 0.42, fsT, fsC };
+    return { cx: -dx * R * 0.36, cy: -dy * R * 0.36, w: R * 0.56, fsT: baseT * 0.72, fsC: 12.5 };
   }
 
   function openDetail() {
@@ -363,13 +381,15 @@ function start(projects, canvas, gl2, FONT) {
     $('#d-title').textContent = p.title;
     $('#d-desc').textContent = p.fullDescription;
     const wrap = $('#d-repo-wrap'); wrap.textContent = '';
-    if (p.repoUrl && p.repoUrl.trim()) {
+    const addLink = (url, label) => {
+      if (!url || !url.trim()) return;
       const a = document.createElement('a');
-      a.id = 'd-repo'; a.href = p.repoUrl; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = 'REPOSITORIO ↗';
+      a.href = url.trim(); a.target = '_blank'; a.rel = 'noopener noreferrer';
+      a.textContent = `${label} ↗`;
       wrap.appendChild(a);
-    } else {
-      const s = document.createElement('span'); s.className = 'pending'; s.textContent = 'REPOSITORIO — PRÓXIMAMENTE'; wrap.appendChild(s);
-    }
+    };
+    addLink(p.playUrl, (p.playLabel && p.playLabel.trim()) || 'JUGAR');
+    addLink(p.repoUrl, (p.repoLabel && p.repoLabel.trim()) || 'REPOSITORIO GITHUB');
     detailWanted = true; previewWanted = true;
     cursorWasInsideRect = false;
     setState(STATE.DETAIL_RECT);
@@ -386,7 +406,7 @@ function start(projects, canvas, gl2, FONT) {
 
   window.addEventListener('click', (e) => {
     if (state === STATE.DETAIL_RECT) {
-      if (e.target.closest && e.target.closest('#d-repo')) return;
+      if (e.target.closest && e.target.closest('#d-repo-wrap a')) return;
       if (!cursorInsideBox()) closeDetail();
       return;
     }
@@ -539,33 +559,39 @@ function start(projects, canvas, gl2, FONT) {
     curBgA = bgA; curBgB = bgB; curBgMix = bgMix;
 
     needed.clear();
-    if (bgAmt > 0.01 && bhBlackout < 0.99) { needed.add(bgA); needed.add(bgB); }
+    if (bgAmt > 0.01 && bhPull < 0.99) { needed.add(bgA); needed.add(bgB); }
     const cb = currentBox();
     const boxOn = !!cb && (vidR >= MIN_VIDEO_PX || detailP > 0.01);
     if (boxOn) needed.add(previewId);
     videos.update(t, dt, needed, boxOn ? previewId : -1);
     for (let k = 0; k < N; k++) colorsRef[k] = videos.getColor(k);
 
-    // --- ciclo del agujero negro en HERO_TEXT (clímax + blackout + restauración) ---
+    // --- ciclo del agujero negro en HERO_TEXT (vórtice real del fondo + absorción de textos DOM + restauración limpia) ---
+    const bhs = ps.getBlackHoleState();
     if (bhMode === 'active') {
-      const bhs = ps.getBlackHoleState();
-      if (!bhClimax && bhs.ratio >= PHYSICS_CONFIG.bhClimaxRatio) {
-        bhClimax = true;
-        spawnHeroClimaxReplicas();
-        bhDomAlpha = 0;                 // oculta DOM en el mismo fotograma que nacen sus réplicas ASCII
+      if (bhs.ratio >= 0.45) {
+        if (!bhBgSpawned) { bhBgSpawned = true; spawnHeroBgReplicas(); }
+        const pullTarget = clamp01((bhs.ratio - 0.45) / 0.42);
+        const minRamp = bhs.ratio >= 0.72 ? clamp01(bhPull + dt * 0.55) : pullTarget;
+        bhPull += (Math.max(pullTarget, minRamp) - bhPull) * expK(6, dt);
+        const swallowR = Math.hypot(W, H) * (1.08 - bhPull * 1.16);
+        ps.activateExtrasOutside(swallowR);
       }
-      if (bhClimax) bhBlackout = clamp01(bhBlackout + dt / 0.18);
+      if (!bhDomCaptured && bhs.ratio >= 0.72) {
+        bhDomCaptured = true;
+        spawnHeroTextReplicas();
+      }
     } else if (bhMode === 'restoring') {
-      const bhs = ps.getBlackHoleState();
       const rt = bhs.relTime;
-      if (bhClimax) {
-        const prog = clamp01((rt - 0.12) / 0.42);
-        bhBlackout = 1 - easeOutCubic(prog);
-        bhDomAlpha = easeOutCubic(prog);
+      bhPull = Math.max(0, bhPull - dt * 1.75);
+      if (bhDomCaptured && rt >= 0.45) {
+        bodyEl.classList.remove('bh-hide-dom');
+        bhDomAlpha = easeOutCubic(clamp01((rt - 0.45) / 0.45));
       }
       if (!bhs.releasing) {
-        bhMode = 'idle'; bhClimax = false; bhBlackout = 0; bhDomAlpha = 1;
-        bodyEl.classList.remove('bh-active');
+        bhMode = 'idle'; bhBgSpawned = false; bhDomCaptured = false; bhPull = 0; bhDomAlpha = 1;
+        bodyEl.classList.remove('bh-active', 'bh-hide-dom');
+        scrollHint.style.animation = '';
       }
     }
 
@@ -646,9 +672,11 @@ function start(projects, canvas, gl2, FONT) {
     bu.tA.value = videos.getTexture(bgA); bu.tB.value = videos.getTexture(bgB);
     bu.uMix.value = bgMix; bu.uTime.value = t; bu.uBgAmt.value = bgAmt;
     bu.uSimplify.value = 1 + 0.5 * smooth(0.1, 0.45, scrollP);
+    const bhsNow = ps.getBlackHoleState();
     bu.uTint.value.set(tintCol[0], tintCol[1], tintCol[2]);
     bu.uTintAmt.value = tintAmt * TINT_MAX;
-    bu.uBlackout.value = bhBlackout;
+    bu.uBlackHolePos.value.set((W * 0.5 + bhsNow.x) / Math.max(1, W), (H * 0.5 + bhsNow.y) / Math.max(1, H));
+    bu.uBlackHolePull.value = bhPull;
 
     // --- caja de vídeo + escáner ASCII graduado ---
     if (boxOn) {
@@ -674,8 +702,9 @@ function start(projects, canvas, gl2, FONT) {
     } else { boxMesh.visible = false; magR = 0; }
 
     // --- DOM ---
-    heroSub.style.opacity = String((1 - smooth(0.04, 0.2, scrollP)) * bhDomAlpha);
-    scrollHint.style.opacity = String((1 - smooth(0.0, 0.08, scrollP)) * bhDomAlpha);
+    const heroDomMul = bhDomCaptured ? bhDomAlpha : 1;
+    heroSub.style.opacity = String((1 - smooth(0.04, 0.2, scrollP)) * heroDomMul);
+    scrollHint.style.opacity = String((1 - smooth(0.0, 0.08, scrollP)) * heroDomMul);
     if (previewId >= 0) {
       const es = entryScale[previewId];
       const o = clamp01((es - 0.35) / 0.45) * smooth(MIN_VIDEO_PX, MIN_VIDEO_PX + 24, vidR) * (1 - d) * (state === STATE.DETAIL_RECT ? 0 : 1) * (previewWanted ? 1 : 0);
@@ -685,11 +714,12 @@ function start(projects, canvas, gl2, FONT) {
         if (previewEl.dataset.id !== String(previewId)) {
           previewEl.dataset.id = String(previewId);
           ptTitle.textContent = projects[previewId].title; ptConcept.textContent = projects[previewId].shortConcept || '';
-          ptTitle.style.fontSize = L.fsT + 'px'; ptConcept.style.fontSize = L.fsC + 'px';
         }
+        ptTitle.style.fontSize = L.fsT + 'px'; ptConcept.style.fontSize = L.fsC + 'px';
         if (!textPosInit) { textPosX = L.cx; textPosY = L.cy; textPosInit = true; }
         else { const kt = expK(12, dt); textPosX += (L.cx - textPosX) * kt; textPosY += (L.cy - textPosY) * kt; }
         previewEl.style.width = L.w + 'px';
+        previewEl.style.maxWidth = L.w + 'px';
         previewEl.style.transform = `translate(${W / 2 + textPosX}px, ${H / 2 - textPosY}px) translate(-50%,-50%)`;
       }
     } else previewEl.style.opacity = '0';

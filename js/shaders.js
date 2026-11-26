@@ -65,14 +65,14 @@ void main(){
 
   if (uBhR > 0.5) {
     float db = length(frag - uBhPos);
-    // núcleo hueco negro puro (#000000)
-    float hole = 1.0 - smoothstep(uBhR - 1.5, uBhR + 0.8, db);
-    // borde exterior sutilmente incandescente en blanco
-    float rim = exp(-pow((db - (uBhR + 1.2)) / 3.4, 2.0)) * uBhRim;
-    if (hole > 0.005 || rim > 0.01) {
+    // núcleo negro puro (#000000) con halo radial suave y amplio hacia afuera (R_horizon → R_horizon * 1.48)
+    float hole = 1.0 - smoothstep(uBhR * 0.90, uBhR * 1.06, db);
+    float haloT = clamp((db - uBhR * 0.95) / max(uBhR * 0.54, 7.0), 0.0, 1.0);
+    float halo = pow(1.0 - haloT, 2.2) * smoothstep(uBhR * 0.82, uBhR * 1.04, db) * uBhRim * 0.52;
+    if (hole > 0.004 || halo > 0.006) {
       vec3 gRgb = col * a;
-      vec3 outRgb = mix(gRgb + vec3(rim), vec3(0.0), hole);
-      float outA = max(hole, clamp(a + rim, 0.0, 1.0));
+      vec3 outRgb = mix(gRgb + vec3(halo), vec3(0.0), hole);
+      float outA = max(hole, clamp(a + halo * 0.85, 0.0, 1.0));
       if (outA < 0.02) discard;
       gl_FragColor = vec4(outRgb / max(outA, 0.001), outA);
       return;
@@ -97,25 +97,47 @@ uniform vec3 uBase;
 uniform vec3 uTint;
 uniform float uTintAmt;
 uniform float uVAspect;
-uniform float uBlackout;    // 0 = normal, 1 = vacío negro puro (#000000) durante el clímax del agujero negro
+uniform vec2 uBlackHolePos;   // coords normalizadas [0,1] del agujero negro
+uniform float uBlackHolePull; // 0 = normal, 1 = succión/vórtice total hacia #000000
 varying vec2 vUv;
 void main(){
   vec2 frag = gl_FragCoord.xy / uDpr;
   vec3 col = mix(uBase, uTint, uTintAmt);
-  float vis = 1.0 - uBlackout;
-  if (uBgAmt > 0.003 && vis > 0.003) {
+  vec2 sampleFrag = frag;
+  float swallowKeep = 1.0;
+
+  if (uBlackHolePull > 0.001) {
+    vec2 bhPx = uBlackHolePos * uRes;
+    vec2 toFrag = frag - bhPx;
+    float dist = length(toFrag);
+    float maxD = length(uRes);
+    float nd = dist / max(maxD, 1.0);
+    float pull = uBlackHolePull;
+    // curvatura espiral y succión gravitacional de las UV del fondo ASCII hacia el agujero negro
+    float swirl = pull * (2.9 / (nd + 0.18));
+    float cr = cos(swirl), sr = sin(swirl);
+    float stretch = 1.0 + pull * 1.15 * exp(-nd * 2.1) + pull * 0.42;
+    sampleFrag = bhPx + mat2(cr, -sr, sr, cr) * (toFrag * stretch);
+    // máscara radial progresiva desde el perímetro hacia el centro oscureciendo a #000000 lo ya tragado
+    float ang = atan(toFrag.y, toFrag.x);
+    float wave = 26.0 * sin(ang * 3.0 + dist * 0.014 - uTime * 2.8) * pull;
+    float swallowR = maxD * (1.08 - pull * 1.16) + wave;
+    swallowKeep = 1.0 - smoothstep(swallowR - 130.0, swallowR + 35.0, dist);
+  }
+
+  if (uBgAmt > 0.003 && swallowKeep > 0.003) {
     float cs = 9.0 * uSimplify;
-    vec2 cc = (floor(frag / cs) + 0.5) * cs;
+    vec2 cc = (floor(sampleFrag / cs) + 0.5) * cs;
     vec2 uv = coverUV(cc, uRes * 0.5, uRes * 0.5, uVAspect);
     vec3 v = mix(texture2D(tA, uv).rgb, texture2D(tB, uv).rgb, uMix);
     float lum = dot(v, vec3(0.299, 0.587, 0.114));
     float g = floor(clamp(pow(lum, 0.75) * 1.25, 0.0, 1.0) * 8.99);
-    float a = glyphAlpha(g, fract(frag / cs), cs * uDpr);
-    float vig = 1.0 - 0.45 * smoothstep(0.35, 0.95, length((frag / uRes - 0.5) * vec2(1.0, 0.9)) * 1.6);
+    float a = glyphAlpha(g, fract(sampleFrag / cs), cs * uDpr);
+    float vig = 1.0 - 0.45 * smoothstep(0.35, 0.95, length((sampleFrag / uRes - 0.5) * vec2(1.0, 0.9)) * 1.6);
     col += (v * 0.035 + v * a * 0.30) * uBgAmt * vig;
   }
   col += (hash12(gl_FragCoord.xy + fract(uTime) * 91.7) - 0.5) * 0.05;   // grano ~2.5 %
-  col *= vis;
+  col *= swallowKeep;
   gl_FragColor = vec4(col, 1.0);
 }`;
 

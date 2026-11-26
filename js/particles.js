@@ -281,10 +281,12 @@ export class ParticleSystem {
     this.exR = new Float32Array(MAX_EXTRA); this.exG = new Float32Array(MAX_EXTRA); this.exB = new Float32Array(MAX_EXTRA);
     this.exW = new Float32Array(MAX_EXTRA); this.exE = new Float32Array(MAX_EXTRA);
     this.exRnd = new Float32Array(MAX_EXTRA);
+    this.exActive = new Uint8Array(MAX_EXTRA);
     for (let i = 0; i < MAX_EXTRA; i++) this.exRnd[i] = Math.random();
 
     // estado interno del agujero negro
     this.bh = { active: false, releasing: false, x: 0, y: 0, time: 0, relTime: 0, ratio: 0, ratioSm: 0, ehR: 0, ehVis: 0, rim: 0 };
+    this.heroNoBounce = false;
 
     for (let i = 0; i < n; i++) { this.rnd[i] = Math.random(); this.rectU[i] = i / n; this.rectOff[i] = (Math.random() - 0.5) * 1.5; }
 
@@ -447,12 +449,13 @@ export class ParticleSystem {
     bh.active = true; bh.releasing = false; bh.x = x; bh.y = y;
     bh.time = 0; bh.relTime = 0; bh.ratio = 0; bh.ratioSm = 0;
     bh.ehR = C.bhEhMin; bh.ehVis = 4; bh.rim = 0.55;
+    this.heroNoBounce = false;
     this.bhPulled.fill(0);
     this.extraCount = 0;
   }
 
-  /** Añade partículas temporales (réplicas del fondo ASCII y textos HTML) para absorberlas sin cortes en el clímax. */
-  addExtraParticles(list) {
+  /** Añade partículas temporales (réplicas del fondo ASCII y textos HTML); active=0 permite desprenderlas al paso del vórtice. */
+  addExtraParticles(list, immediate = true) {
     let k = this.extraCount;
     for (let i = 0; i < list.length && k < MAX_EXTRA; i++, k++) {
       const p = list[i];
@@ -461,47 +464,61 @@ export class ParticleSystem {
       this.exVx[k] = 0; this.exVy[k] = 0;
       this.exR[k] = p.r; this.exG[k] = p.g; this.exB[k] = p.b;
       this.exW[k] = p.w; this.exE[k] = 0;
+      this.exActive[k] = immediate ? 1 : 0;
     }
     this.extraCount = k;
   }
 
+  /** Desprende las partículas de fondo situadas fuera del radio del frente de succión (sincronizado con BG_FS). */
+  activateExtrasOutside(swallowR) {
+    const bx = this.bh.x, by = this.bh.y, thr = Math.max(0, swallowR - 55);
+    const thr2 = thr * thr;
+    for (let k = 0; k < this.extraCount; k++) {
+      if (this.exActive[k]) continue;
+      const dx = this.exX[k] - bx, dy = this.exY[k] - by;
+      if (dx * dx + dy * dy >= thr2) this.exActive[k] = 1;
+    }
+  }
+
   clearExtraParticles() { this.extraCount = 0; }
 
-  /** Suelta el clic: explosión centrífuga violenta + retorno reconstruyendo 100 % de ALYSAURIO y réplicas. */
+  /** Suelta el clic: dispersión por pantalla (estilo Aro → ALYSAURIO) + reconstrucción limpia sin elasticidad. */
   releaseBlackHole() {
     const bh = this.bh;
     if (!bh.active) return;
     bh.active = false; bh.releasing = true; bh.relTime = 0;
+    this.heroNoBounce = true;
     const bx = bh.x, by = bh.y, n = this.n;
-    const power = 1100 + 1350 * Math.max(0.25, bh.ratioSm);
+    const pts = this._stratified();
+    const wideSpread = bh.ratioSm > 0.14;
     this._assignTextTargets();
     for (let i = 0; i < n; i++) {
       const dx = this.px[i] - bx, dy = this.py[i] - by;
       const d = Math.hypot(dx, dy);
-      if (this.bhPulled[i] || d < 280) {
+      if (wideSpread || this.bhPulled[i] || d < 260) {
+        this.bdx[i] = pts[i][0]; this.bdy[i] = pts[i][1];
         const ang = d > 1 ? Math.atan2(dy, dx) : this.rnd[i] * TWO_PI;
-        const ca = Math.cos(ang), sa = Math.sin(ang);
-        const sp = power * (0.65 + 0.65 * this.rnd[i]) * (d < 160 ? 1.15 : 0.75);
-        // impulso radial centrífugo + leve giro residual
-        this.vx[i] = ca * sp - sa * sp * 0.18;
-        this.vy[i] = sa * sp + ca * sp * 0.18;
-        this.phase[i] = 6;
-        this.timer[i] = C.bhExplodeTime * (0.85 + 0.3 * this.rnd[i]);
-        this.arrived[i] = 0; this.heat[i] = 1.0;
+        const kick = 550 + 650 * this.rnd[i];
+        this.vx[i] = Math.cos(ang) * kick; this.vy[i] = Math.sin(ang) * kick;
+        this.phase[i] = 4;
+        this.timer[i] = 0.28 + 0.12 * this.rnd[i];
+        this.arrived[i] = 0; this.heat[i] = 0.85;
       }
       this.bhPulled[i] = 0;
     }
+    const power = 750 + 950 * Math.max(0.25, bh.ratioSm);
     for (let k = 0; k < this.extraCount; k++) {
+      if (!this.exActive[k]) continue;
       const dx = this.exX[k] - bx, dy = this.exY[k] - by, d = Math.hypot(dx, dy);
       const ang = d > 1 ? Math.atan2(dy, dx) : this.exRnd[k] * TWO_PI;
-      const sp = power * (0.75 + 0.65 * this.exRnd[k]);
+      const sp = power * (0.65 + 0.65 * this.exRnd[k]);
       this.exVx[k] = Math.cos(ang) * sp; this.exVy[k] = Math.sin(ang) * sp;
-      this.exE[k] = 0.85;
+      this.exE[k] = 0.7;
     }
   }
 
   getBlackHoleState() {
-    return { active: this.bh.active, releasing: this.bh.releasing, ratio: this.bh.ratioSm, relTime: this.bh.relTime };
+    return { active: this.bh.active, releasing: this.bh.releasing, ratio: this.bh.ratioSm, relTime: this.bh.relTime, x: this.bh.x, y: this.bh.y };
   }
 
   buildTextField(text, fontFamily) {
@@ -753,7 +770,7 @@ export class ParticleSystem {
     }
   }
 
-  /** Actualiza la física gravitacional y disco de acreción del agujero negro en HERO_TEXT. */
+  /** Actualiza la física gravitacional: arrastre de marco (cero desfase), espiral cercana (sin segundo anillo) y dispersión exterior. */
   _updateBlackHole(dt, cur) {
     const bh = this.bh, n = this.n, hW = this.W * 0.5, hH = this.H * 0.5;
     const px = this.px, py = this.py, vxA = this.vx, vyA = this.vy;
@@ -761,12 +778,16 @@ export class ParticleSystem {
 
     if (bh.active) {
       bh.time += dt;
+      const prevX = bh.x, prevY = bh.y;
       if (cur.valid) {
-        const k = 1 - Math.exp(-14 * dt);
+        const k = 1 - Math.exp(-18 * dt);
         bh.x += (cur.x - bh.x) * k; bh.y += (cur.y - bh.y) * k;
       }
-      // cuenta partículas atrapadas cerca de la singularidad → masa progresiva
-      const capR = Math.max(115, bh.ehR * 3.1), capR2 = capR * capR;
+      const dBhX = bh.x - prevX, dBhY = bh.y - prevY;
+      const moved = (dBhX * dBhX + dBhY * dBhY) > 1e-6;
+
+      // cuenta partículas atrapadas en la región de acreción → masa progresiva
+      const capR = Math.max(135, bh.ehR * 3.4), capR2 = capR * capR;
       let captured = 0;
       for (let i = 0; i < n; i++) {
         const dx = bh.x - px[i], dy = bh.y - py[i];
@@ -778,29 +799,46 @@ export class ParticleSystem {
       const mass = 1 + Math.pow(bh.ratioSm, 1.35) * 14;
       bh.ehR = C.bhEhMin + Math.pow(bh.ratioSm, 0.85) * (C.bhEhMax - C.bhEhMin);
       bh.ehVis += (bh.ehR - bh.ehVis) * (1 - Math.exp(-12 * dt));
-      bh.rim = 0.48 + 0.52 * Math.min(1, bh.ratioSm * 1.4);
+      bh.rim = 0.52 + 0.48 * Math.min(1, bh.ratioSm * 1.4);
 
       const diag = Math.hypot(this.W, this.H);
-      // alcance inicial localizado que crece progresivamente con la masa acumulada hasta abarcar toda la pantalla
       const rInf = C.bhInitRadius + Math.pow(bh.ratioSm, 0.65) * diag * 0.95 + Math.min(280, bh.time * 65);
       const soft2 = C.bhSoftening * C.bhSoftening;
       const gConst = C.bhGravityBase * mass;
-      const orbActive = bh.ratioSm >= 0.15;
-      const orbBand = 16 + bh.ratioSm * 26;
-      const ehMin = bh.ehVis + 1.5;
+      const ehMin = bh.ehVis + 1.0;
+      const rInnerWell = ehMin * 2.6;
+      const rAccOuter = ehMin * 3.8 + 46;
+      const diskSpread = 52 + bh.ratioSm * 42;
+      const vTangBase = 410 + 490 * (0.25 + 0.75 * bh.ratioSm);
+      const dragDen = Math.max(1, rAccOuter - ehMin * 1.15);
 
       for (let i = 0; i < n; i++) {
         let x = px[i], y = py[i], vx = vxA[i], vy = vyA[i];
+
+        // arrastre de marco (Frame-Dragging): disco interno y horizonte viajan unidos sin huecos en media luna
+        if (pulled[i] && moved) {
+          const distPrev = Math.hypot(x - prevX, y - prevY);
+          let tD = (rAccOuter - distPrev) / dragDen;
+          tD = tD < 0 ? 0 : tD > 1 ? 1 : tD;
+          const drag = tD * tD * (3 - 2 * tD) * 0.94;
+          x += dBhX * drag; y += dBhY * drag;
+        }
+
         const dx = bh.x - x, dy = bh.y - y;
         const d2 = dx * dx + dy * dy, d = Math.sqrt(d2) + 1e-4;
         const att = d < rInf ? Math.pow(1 - d / rInf, 1.45) : 0;
-        const gAcc = (gConst / (d2 + soft2)) * att;
+        let gAcc = (gConst / (d2 + soft2)) * att;
+
+        // pozo interno exponencial / inverso cúbico (R_horizon a R_horizon * 2.6)
+        if (d < rInnerWell) {
+          const uIn = Math.max(0, 1 - (d - ehMin) / Math.max(1, rInnerWell - ehMin));
+          gAcc += (3800 + 2600 * bh.ratioSm) * (uIn * uIn * uIn + 0.45 * Math.exp(2.4 * uIn - 2.4));
+        }
 
         if (!pulled[i]) {
           if (gAcc > C.bhDetachThreshold || d < ehMin + 34) {
             pulled[i] = 1; this.phase[i] = 1; this.hasTarget[i] = 0;
           } else {
-            // letras lejanas permanecen tranquilas en su lugar
             vx *= Math.exp(-12 * dt); vy *= Math.exp(-12 * dt);
             vxA[i] = vx; vyA[i] = vy;
             this.cr[i] = this.cg[i] = this.cb[i] = 1;
@@ -809,103 +847,121 @@ export class ParticleSystem {
           }
         }
 
-        const nx = dx / d, ny = dy / d;            // dirección radial hacia la singularidad
-        const tx = -ny, ty = nx;                  // tangente orbital antihoraria
-        const rOrb = ehMin + 4 + rnd[i] * orbBand;
-        let ax = nx * Math.min(gAcc, 6500), ay = ny * Math.min(gAcc, 6500);
+        const nx = dx / d, ny = dy / d;            // radial hacia adentro
+        const tx = -ny, ty = nx;                  // tangente orbital
+        // distribución radial asimétrica: núcleo denso junto al horizonte y dispersión nebulosa progresiva hacia afuera
+        const rSlot = ehMin + 2 + Math.pow(rnd[i], 2.25) * diskSpread;
+        // velocidad tangencial diferencial: ω ∝ r^-1.15 → v = ω·r ∝ r^-0.15
+        const vTangTarget = vTangBase * Math.pow(ehMin / Math.max(d, ehMin), 0.15) * (0.86 + 0.28 * rnd[i]);
+        const vt = vx * tx + vy * ty;
+        const vr = vx * nx + vy * ny;             // positivo = cayendo hacia adentro
 
-        // disco de acreción: al acercarse al horizonte adquiere velocidad tangencial orbital en vez de colapsar al centro
-        const swirlR = ehMin + orbBand * 2.4;
-        if (d < swirlR) {
-          const w = 1 - d / swirlR;
-          const vOrb = (360 + 540 * (orbActive ? 0.5 + 0.5 * bh.ratioSm : 0.35)) * (0.85 + 0.3 * rnd[i]);
-          const vt = vx * tx + vy * ty;
-          ax += tx * (vOrb - vt) * (4.5 + 6 * w);
-          ay += ty * (vOrb - vt) * (4.5 + 6 * w);
-          // muelle radial hacia la banda de acreción
-          const radialErr = d - rOrb;
-          ax += nx * radialErr * 34; ay += ny * radialErr * 34;
-          // amortigua velocidad radial para estabilizar la órbita
-          const vr = vx * nx + vy * ny;
-          ax -= nx * vr * 5.2; ay -= ny * vr * 5.2;
+        let ax = 0, ay = 0;
+        if (d > rSlot + 16) {
+          // espiral entrante continua (sin órbita lejana estable → cero segundo anillo)
+          const vInTarget = Math.min(1850, 250 + 520 * bh.ratioSm + Math.sqrt(Math.min(gAcc, 14000)) * 9.5);
+          const pullR = (vInTarget - vr) * 5.2 + Math.min(gAcc, 6500) * 0.45;
+          const pullT = (vTangTarget * Math.min(1, (rAccOuter * 1.4) / Math.max(d, ehMin)) - vt) * 3.8;
+          ax = nx * pullR + tx * pullT;
+          ay = ny * pullR + ty * pullT;
         } else {
-          // leve componente espiral al caer desde lejos
-          ax += tx * Math.min(gAcc, 2200) * 0.24;
-          ay += ty * Math.min(gAcc, 2200) * 0.24;
+          // dentro del disco de acreción: rotación rápida con caída de densidad y leve dispersión periférica
+          const jitter = Math.sin(bh.time * 2.6 + rnd[i] * 18.0) * (3 + 10 * rnd[i] * rnd[i]);
+          const err = d - (rSlot + jitter);
+          const pullR = err * 30 - vr * 5.8 + (d < rInnerWell ? Math.min(gAcc, 4500) * 0.15 : 0);
+          const pullT = (vTangTarget - vt) * 7.5;
+          ax = nx * pullR + tx * pullT;
+          ay = ny * pullR + ty * pullT;
         }
 
-        vx = (vx + ax * dt) * Math.exp(-0.9 * dt);
-        vy = (vy + ay * dt) * Math.exp(-0.9 * dt);
+        vx = (vx + ax * dt) * Math.exp(-0.75 * dt);
+        vy = (vy + ay * dt) * Math.exp(-0.75 * dt);
         const sp2 = vx * vx + vy * vy;
-        if (sp2 > 6.5e6) { const s = 2550 / Math.sqrt(sp2); vx *= s; vy *= s; }
+        if (sp2 > 7.5e6) { const s = 2740 / Math.sqrt(sp2); vx *= s; vy *= s; }
         x += vx * dt; y += vy * dt;
 
-        // núcleo hueco estricto: ninguna partícula ocupa el interior negro del horizonte de eventos
+        // núcleo negro hueco estricto
         const ox = x - bh.x, oy = y - bh.y, od = Math.hypot(ox, oy);
         if (od < ehMin) {
           const onx = od > 1e-4 ? ox / od : Math.cos(rnd[i] * TWO_PI);
           const ony = od > 1e-4 ? oy / od : Math.sin(rnd[i] * TWO_PI);
           x = bh.x + onx * ehMin; y = bh.y + ony * ehMin;
-          const vr = vx * onx + vy * ony;
-          if (vr < 0) { vx -= onx * vr; vy -= ony * vr; }
+          const vn = vx * onx + vy * ony;
+          if (vn < 0) { vx -= onx * vn; vy -= ony * vn; }
         }
         x = Math.max(-hW + 1, Math.min(hW - 1, x)); y = Math.max(-hH + 1, Math.min(hH - 1, y));
         px[i] = x; py[i] = y; vxA[i] = vx; vyA[i] = vy;
         this.cr[i] = this.cg[i] = this.cb[i] = 1;
-        this.en[i] = d < swirlR ? Math.min(1, 0.55 + 0.45 * (1 - d / swirlR)) : Math.min(1, Math.sqrt(sp2) / 1800);
+        // energía graduada: núcleos @ % # pegados al horizonte, degradándose hacia x + = ; : . en la periferia
+        const eRad = Math.pow(Math.max(0, 1 - (d - ehMin) / (diskSpread * 1.15)), 1.55);
+        this.en[i] = Math.min(1, Math.max(eRad, Math.sqrt(sp2) / 3400 * 0.45));
       }
 
-      // física gravitacional para las réplicas temporales (fondo ASCII + textos HTML)
+      // física gravitacional para las réplicas temporales activas (fondo ASCII + subtítulo + SCROLL ↓)
       for (let k = 0; k < this.extraCount; k++) {
+        if (!this.exActive[k]) continue;
         let x = this.exX[k], y = this.exY[k], vx = this.exVx[k], vy = this.exVy[k];
+        if (moved) {
+          const distPrev = Math.hypot(x - prevX, y - prevY);
+          let tD = (rAccOuter - distPrev) / dragDen;
+          tD = tD < 0 ? 0 : tD > 1 ? 1 : tD;
+          const drag = tD * tD * (3 - 2 * tD) * 0.94;
+          x += dBhX * drag; y += dBhY * drag;
+        }
         const dx = bh.x - x, dy = bh.y - y, d2 = dx * dx + dy * dy, d = Math.sqrt(d2) + 1e-4;
         const nx = dx / d, ny = dy / d, tx = -ny, ty = nx;
-        const gAcc = Math.min(6800, (gConst * 1.15) / (d2 + soft2) + 750);
-        let ax = nx * gAcc + tx * gAcc * 0.28, ay = ny * gAcc + ty * gAcc * 0.28;
-        const swirlR = ehMin + orbBand * 2.2;
-        if (d < swirlR) {
-          const vOrb = (420 + 480 * bh.ratioSm) * (0.85 + 0.3 * this.exRnd[k]);
-          const vt = vx * tx + vy * ty, vr = vx * nx + vy * ny;
-          ax += tx * (vOrb - vt) * 7 - nx * vr * 5 + nx * (d - (ehMin + 6 + this.exRnd[k] * orbBand)) * 30;
-          ay += ty * (vOrb - vt) * 7 - ny * vr * 5 + ny * (d - (ehMin + 6 + this.exRnd[k] * orbBand)) * 30;
+        const rSlot = ehMin + 4 + Math.pow(this.exRnd[k], 2.1) * diskSpread;
+        const vTangTarget = vTangBase * Math.pow(ehMin / Math.max(d, ehMin), 0.15) * (0.85 + 0.3 * this.exRnd[k]);
+        const vt = vx * tx + vy * ty, vr = vx * nx + vy * ny;
+        let ax, ay;
+        if (d > rSlot + 16) {
+          const vIn = 460 + 620 * bh.ratioSm + (gConst / (d2 + soft2)) * 0.12;
+          const pullR = (Math.min(2000, vIn) - vr) * 5.2;
+          const pullT = (vTangTarget * Math.min(1, (rAccOuter * 1.3) / Math.max(d, ehMin)) - vt) * 3.8;
+          ax = nx * pullR + tx * pullT; ay = ny * pullR + ty * pullT;
+        } else {
+          const pullR = (d - rSlot) * 28 - vr * 5.5;
+          const pullT = (vTangTarget - vt) * 7.2;
+          ax = nx * pullR + tx * pullT; ay = ny * pullR + ty * pullT;
         }
-        vx = (vx + ax * dt) * Math.exp(-0.85 * dt); vy = (vy + ay * dt) * Math.exp(-0.85 * dt);
+        vx = (vx + ax * dt) * Math.exp(-0.8 * dt); vy = (vy + ay * dt) * Math.exp(-0.8 * dt);
         x += vx * dt; y += vy * dt;
         const ox = x - bh.x, oy = y - bh.y, od = Math.hypot(ox, oy);
         if (od < ehMin) {
           const onx = od > 1e-4 ? ox / od : Math.cos(this.exRnd[k] * TWO_PI);
           const ony = od > 1e-4 ? oy / od : Math.sin(this.exRnd[k] * TWO_PI);
           x = bh.x + onx * ehMin; y = bh.y + ony * ehMin;
-          const vr = vx * onx + vy * ony; if (vr < 0) { vx -= onx * vr; vy -= ony * vr; }
+          const vn = vx * onx + vy * ony; if (vn < 0) { vx -= onx * vn; vy -= ony * vn; }
         }
         this.exX[k] = x; this.exY[k] = y; this.exVx[k] = vx; this.exVy[k] = vy;
-        this.exE[k] = d < swirlR ? 0.75 : Math.min(0.8, Math.hypot(vx, vy) / 2000);
+        this.exE[k] = Math.pow(Math.max(0, 1 - (d - ehMin) / (diskSpread * 1.25)), 1.6) * 0.72;
       }
     } else if (bh.releasing) {
       bh.relTime += dt;
-      bh.ehVis = Math.max(0, bh.ehVis - dt * 620);          // colapso rápido del horizonte al soltar
-      bh.rim = Math.max(0, bh.rim - dt * 5.5);
-      // réplicas temporales: explotan ~0.16 s y vuelven hacia sus orígenes mientras se funden con la restauración real
-      const fadeOut = Math.max(0, 1 - Math.max(0, bh.relTime - 0.14) / 0.40);
+      bh.ehVis = Math.max(0, bh.ehVis - dt * 520);
+      bh.rim = Math.max(0, bh.rim - dt * 4.8);
+      // réplicas temporales se dispersan y se desvanecen suavemente mientras se restaura el fondo y los textos DOM
+      const fadeOut = Math.max(0, 1 - Math.max(0, bh.relTime - 0.10) / 0.44);
       for (let k = 0; k < this.extraCount; k++) {
+        if (!this.exActive[k]) continue;
         let x = this.exX[k], y = this.exY[k], vx = this.exVx[k], vy = this.exVy[k];
-        if (bh.relTime < 0.16) {
-          const dk = Math.pow(0.93, dt * 60);
+        if (bh.relTime < 0.20) {
+          const dk = Math.pow(0.94, dt * 60);
           vx *= dk; vy *= dk; x += vx * dt; y += vy * dt;
         } else {
-          const ax = (this.exOx[k] - x) * 58, ay = (this.exOy[k] - y) * 58;
-          const dk = Math.exp(-11 * dt);
+          const ax = (this.exOx[k] - x) * 42, ay = (this.exOy[k] - y) * 42;
+          const dk = Math.exp(-12 * dt);
           vx = (vx + ax * dt) * dk; vy = (vy + ay * dt) * dk;
           x += vx * dt; y += vy * dt;
         }
         this.exX[k] = Math.max(-hW + 1, Math.min(hW - 1, x));
         this.exY[k] = Math.max(-hH + 1, Math.min(hH - 1, y));
         this.exVx[k] = vx; this.exVy[k] = vy;
-        this.exE[k] *= Math.exp(-4 * dt);
+        this.exE[k] *= Math.exp(-4.5 * dt);
       }
       this._extraAlpha = fadeOut;
-      if (bh.relTime >= 0.56) {
-        bh.releasing = false; bh.ehVis = 0; bh.rim = 0; this.extraCount = 0;
+      if (bh.relTime >= 1.05) {
+        bh.releasing = false; bh.ehVis = 0; bh.rim = 0; this.extraCount = 0; this.heroNoBounce = false;
       }
     }
 
@@ -1181,8 +1237,8 @@ export class ParticleSystem {
           }
         } else if (sd >= 1e8) {
           vx *= rest; vy *= rest;
-        } else if (isDetail) {
-          // FASE 2 sobreamortiguada exclusiva para DETAIL_RECT: rápida y decidida, encaja en seco sin rebotes
+        } else if (isDetail || (S.mode === 0 && this.heroNoBounce)) {
+          // FASE 2 sobreamortiguada: DETAIL_RECT y restauración de agujero negro (encaja en seco sin elasticidad ni rebotes)
           ax += rx * C.spacing * 0.25; ay += ry * C.spacing * 0.25;
           let K = KdetRet, c = cDetRet;
           if (arrived[i]) { K = KdetSet; c = cDetSet; }
@@ -1198,7 +1254,7 @@ export class ParticleSystem {
           vn *= Math.exp(-c * dt);
           const lk = arrived[i] ? Math.exp(-16 * dt) : latK;
           vx = ttx * lk + vn * gx; vy = tty * lk + vn * gy;
-          if (arrived[i]) { settle[i] -= dt; if (settle[i] <= 0 || sd < 2.5) ph = 0; }
+          if (arrived[i]) { settle[i] -= dt; if (settle[i] <= 0 || sd < 2.5) { ph = 0; if (!isDetail) hasT[i] = 0; } }
         } else {
           // FASE 2 simbiótica violenta con freno magnético al 20 % (Aro / Hero / Arito)
           const e = hasT[i] ? sd : (sd + inset);
@@ -1280,14 +1336,26 @@ export class ParticleSystem {
       }
     }
 
-    // splat ligero de partículas temporales del agujero negro (réplicas del fondo ASCII + textos HTML)
+    // splat con kernel 3×3 a la MISMA escala ASCII que el fondo y ALYSAURIO (sin puntitos diminutos)
     const exN = this.extraCount, exA = this._extraAlpha || 0;
     if (exN > 0 && exA > 0.01) {
       for (let k = 0; k < exN; k++) {
-        const cx = Math.floor((this.exX[k] + hW) / cs), cy = Math.floor((this.exY[k] + hH) / cs);
-        if (cx < 0 || cy < 0 || cx >= gw || cy >= gh) continue;
-        const w = this.exW[k] * exA, gi = cy * gw + cx;
-        Dm[gi] += w; Dr[gi] += w * this.exR[k]; Dg[gi] += w * this.exG[k]; Db[gi] += w * this.exB[k]; De[gi] += w * this.exE[k];
+        if (!this.exActive[k]) continue;
+        const gx = (this.exX[k] + hW) / cs, gy = (this.exY[k] + hH) / cs, cx = Math.floor(gx), cy = Math.floor(gy);
+        let sum = 0, q = 0;
+        for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++, q++) {
+          const dx = gx - (cx + ox + 0.5), dy = gy - (cy + oy + 0.5);
+          const w = Math.exp(-(dx * dx + dy * dy) * inv2s); w9[q] = w; sum += w;
+        }
+        const inv = (this.exW[k] * exA) / sum;
+        const r = this.exR[k], g = this.exG[k], b = this.exB[k], e = this.exE[k];
+        q = 0;
+        for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++, q++) {
+          const xx = cx + ox, yy = cy + oy;
+          if (xx < 0 || yy < 0 || xx >= gw || yy >= gh) continue;
+          const w = w9[q] * inv, gi = yy * gw + xx;
+          Dm[gi] += w; Dr[gi] += w * r; Dg[gi] += w * g; Db[gi] += w * b; De[gi] += w * e;
+        }
       }
     }
 

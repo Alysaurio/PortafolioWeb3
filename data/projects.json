@@ -1,29 +1,38 @@
 [
   {
     "id": "proyecto1",
-    "title": "PROYECTO 01",
-    "shortConcept": "Descripción breve del concepto jugable en una o dos líneas.",
-    "fullDescription": "Descripción ampliada del proyecto, mecánicas principales, motor (Unity / C#) y dirección artística.",
+    "title": "Oops! me infectó",
+    "shortConcept": "Juego puzzle de predecir y sumar trayectorias para llegar a la meta.",
+    "fullDescription": "Juego puzzle centrado en predecir y sumar trayectorias paso a paso para superar cada nivel y alcanzar la meta.",
     "video": "assets/videos/proyecto1.mp4",
     "fallbackColor": "#4A90E2",
-    "repoUrl": ""
+    "playUrl": "https://alisaurusrecs.itch.io/oops-me-infecto",
+    "playLabel": "JUGAR EN ITCH.IO",
+    "repoUrl": "https://github.com/Alysaurio/Oopsmeinfecto.git",
+    "repoLabel": "REPOSITORIO GITHUB"
   },
   {
     "id": "proyecto2",
-    "title": "PROYECTO 02",
-    "shortConcept": "Descripción breve del concepto jugable en una o dos líneas.",
-    "fullDescription": "Descripción ampliada del proyecto, mecánicas principales, motor (Unity / C#) y dirección artística.",
+    "title": "Dragón sobrevive ataque pollos épico combate",
+    "shortConcept": "Controla a un dragón y sobrevive a dos oleadas de enemigos.",
+    "fullDescription": "Juego arcade en el que controlas a un dragón para resistir y superar dos oleadas de enemigos. Proyecto desarrollado durante el primer ciclo en Construct.",
     "video": "assets/videos/proyecto2.mp4",
-    "fallbackColor": "#E2634A",
-    "repoUrl": ""
+    "fallbackColor": "#50C878",
+    "playUrl": "https://www.construct.net/en/free-online-games/dragon-sobrevive-ataque-81989/play",
+    "playLabel": "JUGAR EN CONSTRUCT",
+    "repoUrl": "",
+    "repoLabel": ""
   },
   {
     "id": "proyecto3",
-    "title": "PROYECTO 03",
-    "shortConcept": "Descripción breve del concepto jugable en una o dos líneas.",
-    "fullDescription": "Descripción ampliada del proyecto, mecánicas principales, motor (Unity / C#) y dirección artística.",
+    "title": "Gato vs skibidis",
+    "shortConcept": "Proyecto de primer ciclo en Unity enfocado en 3 ataques inspirados en armas endgame de Terraria.",
+    "fullDescription": "Proyecto de primer ciclo desarrollado en Unity cuyo enfoque principal es el sistema de combate con 3 ataques distintos; dos de ellos replican y reinterpretan mecánicas de armas endgame de Terraria.",
     "video": "assets/videos/proyecto3.mp4",
-    "fallbackColor": "#6BC46D",
-    "repoUrl": ""
+    "fallbackColor": "#E2A04A",
+    "playUrl": "",
+    "playLabel": "",
+    "repoUrl": "https://github.com/Alysaurio/My-project-14-.git",
+    "repoLabel": "REPOSITORIO GITHUB"
   }
 ]
