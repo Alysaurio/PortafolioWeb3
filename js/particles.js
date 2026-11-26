@@ -541,6 +541,7 @@ export class ParticleSystem {
         tGrid: { value: null }, tAtlas: { value: atlas }, uGrid: { value: new THREE.Vector2(1, 1) },
         uRes: { value: new THREE.Vector2(1, 1) }, uCell: { value: C.cellSize }, uDpr: { value: 1 },
         uBhPos: { value: new THREE.Vector2() }, uBhR: { value: 0 }, uBhRim: { value: 0 }, uBhWarm: { value: 0 },
+        uBhTime: { value: 0 }, uBhMass: { value: 0 },
       },
     });
     this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.material);
@@ -1438,12 +1439,14 @@ export class ParticleSystem {
       }
     }
 
-    // actualiza uniformes del horizonte de eventos en GRID_FS
+    // actualiza uniformes del horizonte de eventos y su corona titilante en GRID_FS
     const u = this.material.uniforms;
     u.uBhPos.value.set(hW + bh.x, hH + bh.y);
     u.uBhR.value = bh.ehVis;
     u.uBhRim.value = bh.rim;
     u.uBhWarm.value = bh.warm;
+    u.uBhTime.value = bh.active ? bh.time : (bh.time + bh.relTime);
+    u.uBhMass.value = bh.active ? Math.min(1, 0.28 + 0.72 * bh.ratioSm) : Math.max(0, (0.28 + 0.72 * bh.ratioSm) * (1 - bh.relTime / 0.18));
   }
 
   /** cur: {x,y,px,py,vx,vy,speed,valid} coords centradas (y arriba), px/s */
@@ -1470,6 +1473,7 @@ export class ParticleSystem {
       this.material.uniforms.uBhR.value = 0;
       this.material.uniforms.uBhRim.value = 0;
       this.material.uniforms.uBhWarm.value = 0;
+      this.material.uniforms.uBhMass.value = 0;
       this._extraAlpha = 0;
       if (this.heroNoBounceTimer > 0) {
         this.heroNoBounceTimer -= dt;

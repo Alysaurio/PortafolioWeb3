@@ -55,6 +55,8 @@ uniform vec2 uBhPos;        // coords CSS (y hacia arriba)
 uniform float uBhR;         // radio del horizonte de eventos (0 = inactivo)
 uniform float uBhRim;       // intensidad del halo difuso exterior
 uniform float uBhWarm;      // 0 = blanco puro, 1 = sutil matiz cálido-blanco al mezclarse el fondo
+uniform float uBhTime;      // tiempo acumulado del agujero negro (titileo y rotación horaria de la corona)
+uniform float uBhMass;      // factor de masa [0..1] para escalar suavemente la corona exterior (0 al soltar)
 varying vec2 vUv;
 void main(){
   vec2 frag = gl_FragCoord.xy / uDpr;
@@ -70,22 +72,68 @@ void main(){
   vec3 col = d.rgb;
 
   if (uBhR > 0.5) {
-    float db = length(frag - uBhPos);
-    // núcleo negro puro (#000000) con halo ígneo suave: blanco-cálido interior fundiéndose en ámbar/naranja fuego hacia afuera
+    vec2 dv = frag - uBhPos;
+    float db = length(dv);
+    // núcleo negro puro (#000000) con borde suavizado unido al disco
     float hole = 1.0 - smoothstep(uBhR * 0.90, uBhR * 1.06, db);
-    float haloT = clamp((db - uBhR * 0.94) / max(uBhR * 0.68, 9.0), 0.0, 1.0);
-    float halo = pow(1.0 - haloT, 2.0) * smoothstep(uBhR * 0.82, uBhR * 1.04, db) * uBhRim * 0.62;
+    float outerEdge = smoothstep(uBhR * 0.84, uBhR * 1.03, db);
+
+    // halo inmediato cálido-ígneo ceñido al horizonte
+    float haloT = clamp((db - uBhR * 0.94) / max(uBhR * 0.58, 8.0), 0.0, 1.0);
+    float halo = pow(1.0 - haloT, 2.2) * outerEdge * uBhRim * 0.36;
     vec3 innerFire = vec3(1.0, 0.97, 0.88);
     vec3 midFire   = vec3(1.0, 0.58, 0.15);
     vec3 outerFire = vec3(0.88, 0.24, 0.06);
     vec3 haloCol = haloT < 0.36
       ? mix(innerFire, midFire, smoothstep(0.0, 0.36, haloT))
       : mix(midFire, outerFire, smoothstep(0.36, 1.0, haloT));
-    haloCol = mix(haloCol, vec3(1.0, 0.93, 0.78), (1.0 - haloT) * uBhWarm * 0.25);
-    if (hole > 0.004 || halo > 0.006) {
+    haloCol = mix(haloCol, vec3(1.0, 0.93, 0.78), (1.0 - haloT) * uBhWarm * 0.22);
+
+    // corona exterior tenue y de corto alcance (R_horizon → R_horizon * 1.75) con 2 halos descentrados en giro horario
+    vec3 coronaRgb = vec3(0.0);
+    float coronaA = 0.0;
+    if (uBhMass > 0.004 && db < uBhR * 1.82) {
+      float bt = uBhTime;
+      float ang = atan(dv.y, dv.x);
+      float outerClip = 1.0 - smoothstep(uBhR * 1.44, uBhR * 1.75, db);
+
+      // titileo orgánico irregular (3 frecuencias no armónicas, ±22–24 %)
+      float fl1 = sin(bt * 7.3) * 0.45 + sin(bt * 13.7 + 1.9) * 0.35 + sin(bt * 21.1 + 4.2) * 0.20;
+      float fl2 = sin(bt * 6.1 + 2.7) * 0.45 + sin(bt * 15.3 + 0.6) * 0.35 + sin(bt * 23.7 + 3.1) * 0.20;
+      float arcSh = 0.5 + 0.5 * sin(ang * 3.0 + bt * 2.9) * cos(ang * 2.0 - bt * 1.7);
+
+      // halo 1: ligeramente descentrado (2–4 px) girando en sentido horario, tono marfil/ámbar/coral cálido
+      float a1 = -bt * 1.15;
+      float off1 = clamp(uBhR * 0.085, 2.0, 4.0);
+      float d1 = length(dv - vec2(cos(a1), sin(a1)) * off1);
+      float t1 = clamp((d1 - uBhR * 0.95) / max(uBhR * 0.80, 10.0), 0.0, 1.0);
+      float w1 = pow(1.0 - t1, 2.3) * outerEdge * outerClip * (1.0 + 0.22 * fl1) * 0.165 * uBhMass * uBhRim;
+      float warmW = 0.5 + 0.5 * sin(bt * 2.3 + 0.8 + sin(bt * 4.1) * 0.7 + ang);
+      vec3 cWarm = mix(vec3(1.000, 0.722, 0.361), vec3(1.000, 0.451, 0.278), warmW * 0.52);
+      vec3 col1 = mix(vec3(1.000, 0.953, 0.863), cWarm, smoothstep(0.0, 0.68, t1));
+
+      // halo 2: descentrado con fase distinta en giro horario, ámbar con fugaces destellos fríos ionizados (cian/índigo)
+      float a2 = -bt * 0.78 + 2.35;
+      float off2 = clamp(uBhR * 0.075, 2.0, 3.6);
+      float d2 = length(dv - vec2(cos(a2), sin(a2)) * off2);
+      float t2 = clamp((d2 - uBhR * 0.96) / max(uBhR * 0.78, 10.0), 0.0, 1.0);
+      float w2 = pow(1.0 - t2, 2.5) * outerEdge * outerClip * (1.0 + 0.24 * fl2) * 0.105 * uBhMass * uBhRim;
+      float ionWave = sin(bt * 3.1 + 1.4) * 0.55 + sin(bt * 5.7 + 3.8 + ang * 2.0) * 0.45;
+      float ionAmt = smoothstep(0.12, 0.85, ionWave) * (0.38 + 0.32 * arcSh);
+      vec3 cIon = mix(vec3(0.471, 0.894, 1.000), vec3(0.557, 0.635, 1.000), 0.5 + 0.5 * sin(bt * 4.3 - ang));
+      vec3 col2 = mix(vec3(1.000, 0.722, 0.361), cIon, ionAmt);
+      col2 = mix(vec3(1.000, 0.953, 0.863), col2, smoothstep(0.0, 0.52, t2));
+
+      coronaRgb = col1 * w1 + col2 * w2;
+      coronaA = clamp(w1 + w2, 0.0, 0.30);
+    }
+
+    if (hole > 0.004 || halo > 0.005 || coronaA > 0.004) {
       vec3 gRgb = col * a;
-      vec3 outRgb = mix(gRgb + haloCol * halo, vec3(0.0), hole);
-      float outA = max(hole, clamp(a + halo * 0.85, 0.0, 1.0));
+      vec3 glowRgb = haloCol * halo + coronaRgb;
+      // composición suave tipo screen sobre las partículas ASCII; centro estrictamente #000000
+      vec3 outRgb = mix(gRgb + glowRgb * (1.0 - gRgb * 0.45), vec3(0.0), hole);
+      float outA = max(hole, clamp(a + halo * 0.72 + coronaA * 0.95, 0.0, 1.0));
       if (outA < 0.02) discard;
       gl_FragColor = vec4(outRgb / max(outA, 0.001), outA);
       return;
